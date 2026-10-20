@@ -27,7 +27,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    await openMenu(page);
    assert.ok(await page.evaluate(()=>{
     const bounds=[...document.querySelectorAll('.fr-controls-host button')].map(e=>e.getBoundingClientRect());
-    return bounds.every(r=>r.left>=12&&r.right<=innerWidth-12&&r.top>=0&&r.bottom<=innerHeight-8&&r.width>=44&&r.height>=44)&&bounds.every((r,i)=>bounds.every((s,j)=>i===j||Math.max(s.left-r.right,r.left-s.right,s.top-r.bottom,r.top-s.bottom)>=18));
+    return bounds.every(r=>r.left>=12&&r.right<=innerWidth-12&&r.top>=0&&r.bottom<=innerHeight-8&&r.width>=44&&r.height>=44)&&bounds.every((r,i)=>bounds.every((s,j)=>i===j||Math.max(s.left-r.right,r.left-s.right,s.top-r.bottom,r.top-s.bottom)>=8));
    }),'expanded controls have visible breathing room');
    assert.ok(await page.locator('[data-fr-action="previous"]').isDisabled());
    await page.locator('.fr-appearance-toggle').click();
@@ -83,7 +83,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    await page.waitForTimeout(1100);
    await page.addStyleTag({content:'#reader-root .fr-reader{--fr-safe-left:47px;--fr-safe-right:47px;--fr-safe-bottom:21px}'});
    await openMenu(page);
-   for(const viewport of [{width:844,height:390},{width:568,height:300}]){
+   for(const viewport of [{width:844,height:390},{width:568,height:280}]){
     await page.setViewportSize(viewport);
     await page.waitForFunction(size=>document.querySelector('.fr-liquid-surface').style.getPropertyValue('--fr-control-size')===`${size}px`,viewport.height<320?44:52);
     await page.waitForFunction(()=>[...document.querySelectorAll('.fr-liquid-actions .fr-liquid-item')].every((e,index)=>{
@@ -95,7 +95,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
     }));
     assert.ok(await page.evaluate(()=>{
      const bounds=[...document.querySelectorAll('.fr-controls-host button')].map(e=>e.getBoundingClientRect());
-     return bounds.every(r=>r.left>=47+12&&r.right<=innerWidth-47-12&&r.top>=16&&r.bottom<=innerHeight-21-12&&r.width>=44&&r.height>=44)&&bounds.every((r,i)=>bounds.every((s,j)=>i===j||Math.max(s.left-r.right,r.left-s.right,s.top-r.bottom,r.top-s.bottom)>=18));
+     return bounds.every(r=>r.left>=47+12&&r.right<=innerWidth-47-12&&r.top>=16&&r.bottom<=innerHeight-21-12&&r.width>=44&&r.height>=44)&&bounds.every((r,i)=>bounds.every((s,j)=>i===j||Math.max(s.left-r.right,r.left-s.right,s.top-r.bottom,r.top-s.bottom)>=8));
     }),'controls retain margins and 44px targets in landscape');
    }
    await context.close();

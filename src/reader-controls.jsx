@@ -16,7 +16,7 @@ function ReadingControls({model}){
   {action:'appearance',label:'Themes & Text',glyph:<span className="fr-aa" aria-hidden="true">Aa</span>}
  ];
  return <div className="fr-liquid-surface" data-fr-expanded={expanded?'true':'false'} style={{'--fr-control-size':`${size}px`}}>
-  <Liquid blur={6} contrast={18} fill="var(--fr-liquid-fill)" style={{width,height,pointerEvents:'none'}}>
+  <Liquid blur={4} contrast={18} fill="var(--fr-liquid-fill)" style={{width,height,pointerEvents:'none'}}>
    <div id="fr-reading-actions" className="fr-liquid-actions" role="group" aria-label="Reading tools" aria-hidden={!expanded} inert={!expanded} style={{position:'absolute',inset:0,pointerEvents:'none'}}>
    {rows.map((row,index)=><Liquid.Item key={row.action} effect="morph" className="fr-liquid-item" style={{...anchor,pointerEvents:expanded?'auto':'none'}} x={expanded?size-width:0} y={expanded?-(3-index)*step:0} transition={rowMotion} delay={expanded?index*30:(2-index)*20}>
     <button type="button" className={`fr-liquid-row fr-${row.action}-toggle`} data-fr-action={row.action} aria-controls={`fr-${row.action}-panel`} aria-expanded="false" aria-hidden={!expanded} tabIndex={expanded?0:-1} style={{width:expanded?width:size,'--fr-liquid-delay':`${expanded?index*30:(2-index)*20}ms`}}>
@@ -46,15 +46,15 @@ function ReadingControls({model}){
 // its existing DOM and word-offset model. Unmounting also stops library motion.
 export function createReadingControls(host,reader){
  let root,observer;
- let model={expanded:false,percentage:0,previousDisabled:true,nextDisabled:false,width:320,height:268,step:72,size:52};
+ let model={expanded:false,percentage:0,previousDisabled:true,nextDisabled:false,width:252,height:238,step:62,size:52};
  function render(){if(root)flushSync(()=>root.render(<ReadingControls model={model}/>));}
  function resize(){
   const style=getComputedStyle(reader),safe=side=>parseFloat(style.getPropertyValue(`--fr-safe-${side}`))||0;
-  const width=Math.min(320,reader.clientWidth-safe('left')-safe('right')-32);
+  const width=Math.min(252,reader.clientWidth-safe('left')-safe('right')-32);
   // Keep breathing room even in landscape; shrink the targets before the gaps.
   const available=reader.clientHeight-safe('top')-safe('bottom')-36;
-  const size=available>=268?52:44;
-  const step=size+20;
+  const size=available>=238?52:44;
+  const step=size+10;
   if(model.width===width&&model.size===size)return;
   model={...model,width,size,step,height:step*3+size};render();
  }
