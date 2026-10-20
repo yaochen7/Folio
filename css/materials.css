@@ -1,0 +1,83 @@
+/*
+ * Folio's web adaptation of Apple's Regular Liquid Glass principles.
+ * Use on a single floating control surface, never on book content or nested
+ * surfaces. Solid fills come first so older browsers keep the same hierarchy.
+ */
+:root {
+  --glass-solid: light-dark(#f7f8fa, #24262b);
+  --glass-fill: light-dark(rgb(250 251 253 / .78), rgb(34 36 42 / .84));
+  --glass-raised-fill: light-dark(rgb(253 253 255 / .92), rgb(36 38 44 / .94));
+  --glass-edge: light-dark(rgb(255 255 255 / .9), rgb(255 255 255 / .16));
+  --glass-sheen: light-dark(rgb(255 255 255 / .65), rgb(255 255 255 / .08));
+  --glass-shadow: light-dark(rgb(31 40 59 / .09), rgb(0 0 0 / .26));
+  --glass-rim: light-dark(rgb(62 73 95 / .08), rgb(255 255 255 / .05));
+  --glass-blur: 24px;
+  --glass-saturation: 1.5;
+  --glass-ease: cubic-bezier(.22, .8, .25, 1);
+}
+
+.folio-glass {
+  background: var(--glass-solid);
+  border: 1px solid var(--glass-edge);
+  box-shadow: 0 8px 28px var(--glass-shadow),
+    0 0 0 1px var(--glass-rim),
+    inset 0 1px 0 var(--glass-sheen);
+}
+
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .folio-glass {
+    background: linear-gradient(135deg, var(--glass-sheen), transparent 48%), var(--glass-fill);
+    -webkit-backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+    backdrop-filter: blur(var(--glass-blur)) saturate(var(--glass-saturation));
+  }
+}
+
+/* These modifiers follow system preferences wherever the browser exposes them.
+ * !important prevents a component's greater specificity restoring transparency.
+ */
+@media (prefers-reduced-transparency: reduce) {
+  .folio-glass {
+    background: var(--glass-solid) !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .folio-glass {
+    background: var(--glass-solid) !important;
+    border-color: currentColor !important;
+    box-shadow: none !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+  .folio-glass [aria-current="page"] {
+    text-decoration: underline !important;
+    text-underline-offset: 4px !important;
+  }
+}
+
+@media (forced-colors: active) {
+  .folio-glass {
+    background: Canvas !important;
+    color: CanvasText !important;
+    border: 1px solid CanvasText !important;
+    box-shadow: none !important;
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+  .folio-glass :is([aria-current="page"], [aria-current="true"], [aria-pressed="true"], [aria-expanded="true"]):not(:focus-visible) {
+    outline: 2px solid Highlight;
+    outline-offset: -4px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .folio-glass, .folio-glass::before, .folio-glass::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .folio-glass :is(button, a):active {
+    transform: none !important;
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "projects": {
+    "default": "xilo-web-systems"
+  },
+  "targets": {
+    "xilo-web-systems": {
+      "hosting": {
+        "folio": [
+          "xilo-folio"
+        ]
+      }
+    }
+  },
+  "etags": {}
+}

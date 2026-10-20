@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#f1f2f5" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#202125" media="(prefers-color-scheme: dark)">
+  <meta name="description" content="A world between the covers. Discover original stories and make a little time to read with Folio.">
+  <title>Folio — A world between the covers</title>
+  <link rel="icon" href="./favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="./css/materials.css">
+  <link rel="stylesheet" href="./css/cover-art.css">
+  <link rel="stylesheet" href="./css/account-details.css">
+  <link rel="stylesheet" href="./css/site.css">
+  <link rel="stylesheet" href="./css/reader.css">
+  <script type="module" src="./js/app.js"></script>
+</head>
+<body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
+  <div id="folio-app" class="folio-shell">
+    <div class="folio-workspace">
+      <header class="folio-nav"><div class="folio-nav-surface">
+        <span class="nav-glass folio-glass" aria-hidden="true"></span>
+        <a class="brand" href="#discover" aria-label="Folio home"><span data-icon="book-open" aria-hidden="true"></span>folio</a>
+        <nav class="nav-links" id="main-navigation" aria-label="Main navigation">
+          <a href="#discover" data-nav="discover"><span class="nav-symbol" data-icon="compass" aria-hidden="true"></span><span>Discover</span></a>
+          <a href="#collections" data-nav="collections"><span class="nav-symbol" data-icon="grid" aria-hidden="true"></span><span>Collections</span></a>
+          <a href="#library" data-nav="library"><span class="nav-symbol" data-icon="library" aria-hidden="true"></span><span>My Library <span class="library-count" aria-label="saved books"></span></span></a>
+        </nav>
+        <div class="nav-actions"><button class="icon-button search-button" type="button" data-action="search" aria-label="Search books" aria-expanded="false"><span data-icon="search" aria-hidden="true"></span></button><button class="account-button" type="button" data-action="account" aria-label="Sign in to Folio"><span class="account-label">Sign in</span></button></div>
+      </div></header>
+      <section class="search-bar" aria-label="Search the collection" hidden><span data-icon="search" aria-hidden="true"></span><input id="book-search" type="search" aria-label="Search by title, author, or genre" placeholder="Find a title, author, or genre" autocomplete="off"><button class="icon-button" type="button" data-action="close-search" aria-label="Close search"><span data-icon="x" aria-hidden="true"></span></button></section>
+      <main id="main-content" tabindex="-1"></main>
+      <footer class="folio-footer"><span>Folio</span><span>Original stories. Free to read.</span><span>A world between the covers.</span></footer>
+    </div>
+  </div>
+  <div id="reader-root"></div>
+  <dialog id="account-dialog" class="folio-glass" aria-labelledby="account-title"><div id="account-content"></div></dialog>
+  <div class="toast" id="folio-toast" role="status" aria-live="polite" hidden></div>
+  <noscript><p class="noscript-message">Folio needs JavaScript to open books and keep your reading place.</p></noscript>
+</body>
+</html>

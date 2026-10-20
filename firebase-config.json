@@ -1,0 +1,14 @@
+{
+  "projectId": "xilo-web-systems",
+  "appId": "1:783405737118:web:968ccf2fd49a8fefd0878f",
+  "databaseURL": "https://xilo-web-systems-default-rtdb.firebaseio.com",
+  "storageBucket": "xilo-web-systems.firebasestorage.app",
+  "apiKey": "AIzaSyD5Nf1PLtcHE_llQutkgWUyw6ujLXHJpis",
+  "authDomain": "xilo-web-systems.firebaseapp.com",
+  "messagingSenderId": "783405737118",
+  "measurementId": "G-88H0FCG192",
+  "projectNumber": "783405737118",
+  "version": "2",
+  "googleSignInEnabled": false,
+  "emailSignUpEnabled": false
+}

@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function folioOwns(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function folioValidBookId(bookId) {
+      return bookId.matches('^[a-z0-9][a-z0-9_-]{0,79}$');
+    }
+
+    function folioValidLibrary(data, bookId) {
+      return folioValidBookId(bookId)
+        && data.keys().hasAll(['bookId', 'addedAt', 'updatedAt'])
+        && data.keys().hasOnly(['bookId', 'title', 'author', 'genre', 'kind', 'addedAt', 'updatedAt'])
+        && data.bookId == bookId
+        && data.addedAt is timestamp
+        && data.updatedAt == request.time
+        && data.get('title', '') is string && data.get('title', '').size() <= 200
+        && data.get('author', '') is string && data.get('author', '').size() <= 120
+        && data.get('genre', '') is string && data.get('genre', '').size() <= 80
+        && data.get('kind', '') is string && data.get('kind', '').size() <= 80;
+    }
+
+    function folioValidProgress(data, bookId) {
+      return folioValidBookId(bookId)
+        && data.keys().hasAll(['bookId', 'wordOffset', 'fraction', 'clientUpdatedAt', 'updatedAt'])
+        && data.keys().hasOnly(['bookId', 'wordOffset', 'fraction', 'clientUpdatedAt', 'updatedAt'])
+        && data.bookId == bookId
+        && data.wordOffset is int && data.wordOffset >= 0 && data.wordOffset <= 10000000
+        && data.fraction is number && data.fraction >= 0 && data.fraction <= 1
+        && data.clientUpdatedAt is int && data.clientUpdatedAt >= 0 && data.clientUpdatedAt <= 4102444800000
+        && data.updatedAt == request.time;
+    }
+
+    match /folioCatalog/{bookId} {
+      // Publish with the Firebase console or a trusted Admin SDK process (IAM).
+      // Browser accounts, including users who add an 'admin' field, cannot write here.
+      allow read: if resource.data.published == true;
+      allow write: if false;
+    }
+
+    match /folioUsers/{uid}/library/{bookId} {
+      allow read, delete: if folioOwns(uid);
+      allow create: if folioOwns(uid) && folioValidLibrary(request.resource.data, bookId)
+        && request.resource.data.addedAt == request.time;
+      allow update: if folioOwns(uid) && folioValidLibrary(request.resource.data, bookId)
+        && request.resource.data.addedAt == resource.data.addedAt;
+    }
+
+    match /folioUsers/{uid}/progress/{bookId} {
+      allow read, delete: if folioOwns(uid);
+      allow create, update: if folioOwns(uid) && folioValidProgress(request.resource.data, bookId);
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
