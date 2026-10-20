@@ -77,6 +77,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   let openedBodyLock = false;
   let curlRenderer = null, curlUnavailable = false, warmTimer = 0;
   let chromeVisible = true, searchHighlight = '', openingTimer = 0;
+  let appearanceMotion = null;
 
   root.hidden = true;
   root.innerHTML = `
@@ -100,13 +101,16 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
         <p class="fr-search-status" role="status"></p><ol class="fr-search-results"></ol>
       </aside>
       <aside class="fr-panel fr-appearance-panel folio-glass" id="fr-appearance-panel" aria-labelledby="fr-appearance-heading" hidden>
-        <div class="fr-panel-heading"><h2 id="fr-appearance-heading">Make yourself comfortable.</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close appearance settings">${icon('x')}</button></div>
+        <div class="fr-appearance-content">
+        <div class="fr-panel-heading"><h2 id="fr-appearance-heading">Make yourself comfortable.</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Back to reading tools">${icon('chevron-left')}</button></div>
         <div class="fr-font-control"><span>Text size</span><div><button class="fr-size-button" type="button" data-fr-action="smaller" aria-label="Decrease text size">A−</button><output class="fr-font-value"></output><button class="fr-size-button" type="button" data-fr-action="larger" aria-label="Increase text size">A+</button></div></div>
         <fieldset class="fr-themes"><legend>Page colour</legend><div>${THEMES.map(theme => `<button class="fr-theme-option" type="button" data-fr-action="theme" data-fr-theme-option="${theme}" aria-pressed="false"><span aria-hidden="true">A</span>${theme[0].toUpperCase() + theme.slice(1)}</button>`).join('')}</div></fieldset>
         <label class="fr-spread-setting"><span>Two-page view<small class="fr-spread-note">For a little more room.</small></span><input type="checkbox" class="fr-spread-input"></label>
         <label class="fr-spread-setting fr-tap-setting"><span>Tap to turn pages<small class="fr-spread-note">Tap the page edges to go back or forward.</small></span><input type="checkbox" class="fr-tap-input"></label>
         <p class="fr-settings-note">Your reading preferences stay on this device.</p>
+        </div>
       </aside>
+      <div class="fr-appearance-surface folio-glass" aria-hidden="true" hidden></div>
       <div class="fr-announcement" aria-live="polite" aria-atomic="true"></div>
     </section>`;
 
@@ -124,6 +128,8 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   const announcement = root.querySelector('.fr-announcement');
   const contentsPanel = root.querySelector('.fr-contents-panel');
   const appearancePanel = root.querySelector('.fr-appearance-panel');
+  const appearanceContent = root.querySelector('.fr-appearance-content');
+  const appearanceSurface = root.querySelector('.fr-appearance-surface');
   const searchPanel = root.querySelector('.fr-search-panel');
   const bookSearch = root.querySelector('.fr-book-search');
   const searchResults = root.querySelector('.fr-search-results');
@@ -444,15 +450,93 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     reader.dataset.frChrome = visible ? 'shown' : 'hidden';
     const toolbar=root.querySelector('.fr-toolbar'),footer=root.querySelector('.fr-footer');
     if (!visible && controlsHost.contains(document.activeElement)) bookElement.focus({ preventScroll: true });
-    toolbar.inert = !visible; footer.inert = !visible;controlsHost.inert=!visible;
+    toolbar.inert = !visible; footer.inert = !visible;controlsHost.inert=!visible || (!appearancePanel.hidden && !appearancePanel.inert);
     updateChrome();
   }
 
-  function activePanel() { return [contentsPanel, appearancePanel, searchPanel].find(panel => !panel.hidden)||(controls.expanded?controlsHost:null); }
+  function activePanel() { return [contentsPanel, appearancePanel, searchPanel].find(panel => !panel.hidden && !panel.inert)||(controls.expanded?controlsHost:null); }
+
+  function stopAppearanceMotion() {
+    appearanceMotion?.animations.forEach(animation => animation.cancel());
+    appearanceMotion = null;
+    appearanceSurface.hidden = true;
+    appearancePanel.classList.remove('fr-appearance-transition');
+  }
+
+  function finishAppearanceMotion() {
+    if (!appearanceMotion) return;
+    const {opening} = appearanceMotion;
+    stopAppearanceMotion();
+    appearancePanel.hidden = !opening;
+    appearancePanel.inert = !opening;
+    reader.dataset.frAppearance = opening ? 'open' : 'closed';
+    reader.classList.toggle('fr-panel-open', opening);
+    controlsHost.inert = !chromeVisible || opening;
+  }
+
+  // Move one glass surface between the actual pill and panel bounds. Content
+  // animates independently, so the settings never stretch with the material.
+  function transitionAppearance(opening, trigger = root.querySelector('.fr-appearance-toggle')) {
+    const current = appearanceMotion;
+    const from = current ? appearanceSurface.getBoundingClientRect() : (opening ? trigger : appearancePanel).getBoundingClientRect();
+    const fromRadius = current ? parseFloat(getComputedStyle(appearanceSurface).borderRadius) : opening ? from.height / 2 : 28;
+    const surfaceColor = current ? getComputedStyle(appearanceSurface).backgroundColor : null;
+    const currentClip = current ? getComputedStyle(appearancePanel).clipPath : null;
+    const contentStyle = getComputedStyle(appearanceContent);
+    const contentFrom = current ? {opacity:contentStyle.opacity,transform:contentStyle.transform} : {opacity:opening ? 0 : 1,transform:opening ? 'translateY(10px)' : 'none'};
+    stopAppearanceMotion();
+    panelTrigger = trigger;
+    contentsPanel.hidden = true; searchPanel.hidden = true;
+    controls.setExpanded(true);
+    appearancePanel.hidden = false;
+    appearancePanel.inert = !opening;
+    appearancePanel.setAttribute('aria-hidden', String(!opening));
+    reader.classList.toggle('fr-panel-open', opening);
+    reader.dataset.frAppearance = opening ? 'opening' : 'closing';
+    controlsHost.inert = opening;
+    setChrome(true);
+    trigger.setAttribute('aria-expanded', String(opening));
+    const target = (opening ? appearancePanel : trigger).getBoundingClientRect();
+    const panelBounds = appearancePanel.getBoundingClientRect();
+    const panelColor = getComputedStyle(appearancePanel).backgroundColor;
+    const pillColor = getComputedStyle(reader).getPropertyValue('--fr-liquid-tint').trim();
+    const bounds = reader.getBoundingClientRect();
+    const frame = (rect, radius) => ({left:`${rect.left-bounds.left}px`,top:`${rect.top-bounds.top}px`,width:`${rect.width}px`,height:`${rect.height}px`,borderRadius:`${radius}px`});
+    const to = frame(target, opening ? 28 : target.height / 2);
+    const clip = rect => `inset(${Math.max(0,rect.top-panelBounds.top)}px ${Math.max(0,panelBounds.right-rect.right)}px ${Math.max(0,panelBounds.bottom-rect.bottom)}px ${Math.max(0,rect.left-panelBounds.left)}px round 28px)`;
+    Object.assign(appearanceSurface.style, to);
+    appearancePanel.classList.add('fr-appearance-transition');
+    appearanceSurface.hidden = false;
+    const state = {opening,animations:[]};
+    appearanceMotion = state;
+    if (!motionQuery.matches) {
+      state.animations.push(appearanceSurface.animate([
+        {...frame(from,fromRadius),backgroundColor:surfaceColor || (opening ? pillColor : panelColor)},
+        {...to,backgroundColor:opening ? panelColor : pillColor}
+      ],{
+        duration:opening ? 500 : 420,easing:opening ? 'cubic-bezier(.22,1,.36,1)' : 'cubic-bezier(.4,0,.2,1)',fill:'both'
+      }));
+      state.animations.push(appearancePanel.animate([{clipPath:currentClip || clip(from)},{clipPath:clip(target)}],{
+        duration:opening ? 500 : 420,easing:opening ? 'cubic-bezier(.22,1,.36,1)' : 'cubic-bezier(.4,0,.2,1)',fill:'both'
+      }));
+      state.animations.push(appearanceContent.animate([contentFrom,{opacity:opening ? 1 : 0,transform:opening ? 'none' : 'translateY(8px)'}],{
+        duration:opening ? 320 : 140,delay:opening && !current ? 100 : 0,easing:'cubic-bezier(.22,1,.36,1)',fill:'both'
+      }));
+      Promise.all(state.animations.map(animation => animation.finished)).then(() => {
+        if (appearanceMotion === state) finishAppearanceMotion();
+      }).catch(() => { /* A newer action continues from the current surface. */ });
+    } else finishAppearanceMotion();
+    (opening ? appearancePanel.querySelector('button') : trigger)?.focus({preventScroll:true});
+  }
 
   function closePanels(restoreFocus = false) {
     const wasVisible = Boolean(activePanel());
     const containedFocus = [controlsHost, contentsPanel, appearancePanel, searchPanel].some(panel => panel.contains(document.activeElement));
+    stopAppearanceMotion();
+    reader.dataset.frAppearance = 'closed';
+    appearancePanel.inert = false;
+    appearancePanel.removeAttribute('aria-hidden');
+    controlsHost.inert = !chromeVisible;
     for (const panel of [contentsPanel, appearancePanel, searchPanel]) panel.hidden = true;
     controls.setExpanded(false);
     reader.classList.remove('fr-panel-open');
@@ -463,6 +547,10 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
 
   function togglePanel(name, trigger) {
+    if (name === 'appearance') {
+      transitionAppearance(appearancePanel.hidden || appearancePanel.inert, trigger);
+      return;
+    }
     const panel = name === 'contents' ? contentsPanel : name === 'search' ? searchPanel : appearancePanel;
     const show = panel.hidden;
     closePanels(); setChrome(true);
@@ -668,7 +756,10 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     else if (action === 'previous') requestTurn(-1);
     else if (action === 'next') requestTurn(1);
     else if (action === 'contents' || action === 'appearance') togglePanel(action, button);
-    else if (action === 'close-panel') closePanels(true);
+    else if (action === 'close-panel') {
+      if (appearancePanel.contains(button)) transitionAppearance(false);
+      else closePanels(true);
+    }
     else if (action === 'chapter') {
       jumpToOffset(normalized.chapters[Number(button.dataset.frChapter)].start);
       menuButton.focus({ preventScroll: true });
@@ -774,6 +865,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     if (!isOpen) return;
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (!appearancePanel.hidden && !appearancePanel.inert) { transitionAppearance(false); return; }
       if (!closePanels(true)) close();
       return;
     }
@@ -834,6 +926,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
   function onResize() {
     if (!isOpen) return;
+    finishAppearanceMotion();
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => reflow(), 100);
   }
@@ -852,6 +945,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   };
   const onMotionChange = () => {
     if (!isOpen) return;
+    if (motionQuery.matches) finishAppearanceMotion();
     if (motionQuery.matches && turn) { abortTurn(); renderBase(); updateChrome(); }
     else warmPages();
   };

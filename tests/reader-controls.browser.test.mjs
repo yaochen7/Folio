@@ -6,7 +6,11 @@ const require=createRequire(import.meta.url);
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 const base=process.env.FOLIO_TEST_URL||'http://127.0.0.1:4173/';
 const expanded=page=>page.locator('.fr-liquid-surface[data-fr-expanded="true"]').waitFor();
-async function openMenu(page){await page.locator('.fr-menu-toggle').click();await expanded(page);await page.waitForTimeout(650);}
+async function openMenu(page){
+ await page.waitForFunction(()=>!['opening','closing'].includes(document.querySelector('.fr-reader')?.dataset.frAppearance));
+ if(await page.locator('.fr-menu-toggle').getAttribute('aria-expanded')!=='true')await page.locator('.fr-menu-toggle').click();
+ await expanded(page);await page.waitForTimeout(650);
+}
 
 test('one liquid reader button exposes working, accessible controls',async t=>{
  const browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.BROWSER_EXECUTABLE?{executablePath:process.env.BROWSER_EXECUTABLE}:{})});
@@ -49,7 +53,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    await page.locator('.fr-appearance-panel [data-fr-action="larger"]').click();
    assert.equal(await page.locator('.fr-progress-range').inputValue(),offset);
    await page.keyboard.press('Escape');
-   assert.ok(await page.evaluate(()=>document.activeElement.matches('.fr-menu-toggle')));
+   assert.ok(await page.evaluate(()=>document.activeElement.matches('.fr-appearance-toggle')));
    await openMenu(page);
    await page.locator('.fr-search-toggle').click();
    await page.locator('.fr-book-search').fill('quiet');
@@ -120,6 +124,64 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    assert.equal(await page.locator('.fr-controls-host svg[data-gooey-svg]').count(),1);
    await context.close();
   });
+  await t.test('Themes & Text shares a surface with its pill and reverses without jumping',async()=>{
+   const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'no-preference'});
+   await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
+   const page=await context.newPage(),errors=[];
+   page.on('pageerror',error=>errors.push(error.message));
+   await page.goto(base+'#read/quiet');
+   await page.locator('.fr-book[aria-busy="false"]').waitFor();
+   await page.waitForTimeout(1100);
+   await openMenu(page);
+   const result=await page.evaluate(async()=>{
+    const reader=document.querySelector('.fr-reader'),pill=document.querySelector('.fr-appearance-toggle'),surface=document.querySelector('.fr-appearance-surface'),panel=document.querySelector('.fr-appearance-panel'),content=document.querySelector('.fr-appearance-content');
+    const rect=e=>{const r=e.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height}};
+    const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+    const source=rect(pill);
+    pill.click();
+    const start=rect(surface),target=rect(panel),toolsInert=document.querySelector('.fr-controls-host').inert;
+    await wait(140);
+    const middle=rect(surface),textTransform=getComputedStyle(content).transform;
+    const beforeBack=rect(surface);
+    panel.querySelector('[data-fr-action="close-panel"]').click();
+    const afterBack=rect(surface),closingInert=panel.inert;
+    await wait(110);
+    const beforeReopen=rect(surface);
+    pill.click();
+    const afterReopen=rect(surface);
+    return{source,start,target,middle,textTransform,toolsInert,closingInert,beforeBack,afterBack,beforeReopen,afterReopen};
+   });
+   const sameRect=(a,b)=>Object.keys(a).every(key=>Math.abs(a[key]-b[key])<1);
+   assert.ok(sameRect(result.start,result.source),'the surface starts at the actual pill');
+   assert.ok(result.middle.height>result.source.height+10&&result.middle.height<result.target.height,'the glass grows through intermediate shapes');
+   assert.ok(result.textTransform==='none'||/^matrix\(1, 0, 0, 1,/.test(result.textTransform),'settings text is translated, never scaled');
+   assert.equal(result.toolsInert,true,'the fading menu cannot receive hidden input');
+   assert.equal(result.closingInert,true,'returning settings stop receiving input immediately');
+   assert.ok(sameRect(result.beforeBack,result.afterBack),'Back reverses from the current glass bounds');
+   assert.ok(sameRect(result.beforeReopen,result.afterReopen),'reopening continues from the current glass bounds');
+   await page.waitForFunction(()=>document.querySelector('.fr-reader').dataset.frAppearance==='open');
+   assert.equal(await page.locator('.fr-appearance-surface').isVisible(),false);
+   await page.locator('[data-fr-theme-option="night"]').click();
+   await page.getByRole('button',{name:'Back to reading tools'}).click();
+   await page.waitForFunction(()=>document.querySelector('.fr-reader').dataset.frAppearance==='closed');
+   assert.ok(await page.evaluate(()=>document.activeElement.matches('.fr-appearance-toggle')));
+   assert.equal(await page.locator('.fr-menu-toggle').getAttribute('aria-expanded'),'true');
+   await page.locator('.fr-appearance-toggle').click();
+   await page.setViewportSize({width:844,height:390});
+   await page.waitForFunction(()=>document.querySelector('.fr-reader').dataset.frAppearance==='open');
+   assert.ok(await page.locator('.fr-appearance-panel').evaluate(e=>{const r=e.getBoundingClientRect();return r.left>=0&&r.top>=0&&r.right<=innerWidth&&r.bottom<=innerHeight}),'resize settles into the correct panel bounds');
+   assert.equal(await page.locator('[data-fr-theme-option="night"]').getAttribute('aria-pressed'),'true');
+   await page.emulateMedia({reducedMotion:'reduce'});
+   await page.keyboard.press('Escape');
+   await page.locator('.fr-appearance-toggle').click();
+   assert.equal(await page.locator('.fr-reader').getAttribute('data-fr-appearance'),'open');
+   assert.equal(await page.locator('.fr-appearance-surface').isVisible(),false,'reduced motion changes state immediately');
+   await page.keyboard.press('Escape');
+   await page.keyboard.press('Escape');
+   assert.equal(await page.locator('.fr-menu-toggle').getAttribute('aria-expanded'),'false');
+   assert.deepEqual(errors,[]);
+   await context.close();
+  });
   await t.test('tap turning is an opt-in context setting that persists',async()=>{
    const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'reduce'});
    await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
@@ -129,6 +191,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    await openMenu(page);
    await page.locator('.fr-appearance-toggle').click();
    await page.getByRole('checkbox',{name:/Tap to turn pages/}).check();
+   await page.keyboard.press('Escape');
    await page.keyboard.press('Escape');
    const before=await page.locator('.fr-progress-range').inputValue();
    await page.touchscreen.tap(382,400);
@@ -140,6 +203,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    await openMenu(page);
    await page.locator('.fr-appearance-toggle').click();
    await page.getByRole('checkbox',{name:/Tap to turn pages/}).uncheck();
+   await page.keyboard.press('Escape');
    await page.keyboard.press('Escape');
    const offset=await page.locator('.fr-progress-range').inputValue();
    await page.touchscreen.tap(382,400);
