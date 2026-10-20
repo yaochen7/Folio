@@ -86,7 +86,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       <header class="fr-toolbar">
         <div class="fr-title-group"><span id="fr-book-title" class="fr-book-title"></span><span class="fr-book-author"></span></div>
       </header>
-      <div class="fr-stage"><div class="fr-book" aria-label="Book pages" aria-busy="true" tabindex="-1"></div></div>
+      <div class="fr-stage"><div class="fr-book" role="region" aria-label="Book pages" aria-busy="true" tabindex="-1"></div></div>
       <footer class="fr-footer">
         <span class="fr-page-count" aria-label="Reading position"></span><span class="fr-pages-left" hidden></span>
       </footer>
@@ -569,6 +569,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     closePanels(); setChrome(true);
     if (show) {
       panelTrigger = trigger; panel.hidden = false;
+      if (name === 'contents') contentsPanel.querySelector('.fr-chapter-list [aria-current="true"]')?.scrollIntoView({ block: 'nearest' });
       reader.classList.add('fr-panel-open');
       root.querySelectorAll(`[aria-controls="${panel.id}"]`).forEach(button => button.setAttribute('aria-expanded', 'true'));
       (name === 'search' ? bookSearch : panel.querySelector('button:not(:disabled),input:not(:disabled)'))?.focus({ preventScroll: true });
@@ -892,7 +893,9 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     }
     if (event.key === 'Tab') {
       setChrome(true);
-      const focusable = [...root.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href]')]
+      // An open Contents or Search panel keeps Tab inside it, as Themes & text does; Escape leaves.
+      const scope = [contentsPanel, searchPanel].find(panel => !panel.hidden) || root;
+      const focusable = [...scope.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href]')]
         .filter(element => element.tabIndex>=0&&element.getClientRects().length && !element.closest('[hidden],[inert]'));
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
@@ -1014,6 +1017,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     menuButton=root.querySelector('.fr-menu-toggle');
     openedBodyLock = !document.body.classList.contains('reader-open');
     document.body.classList.add('reader-open');
+    document.documentElement.classList.add('fr-reader-open');
     titleElement.textContent = book.title || 'Untitled';
     authorElement.textContent = (book.author || '') + (previewOnly ? ' · Free preview' : '');
     chapterList.replaceChildren();
@@ -1062,7 +1066,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     closePanels();
     root.hidden = true;
     controls.unmount();
-    if (openedBodyLock) document.body.classList.remove('reader-open');
+    if (openedBodyLock) { document.body.classList.remove('reader-open'); document.documentElement.classList.remove('fr-reader-open'); }
     announcement.textContent = '';
     if (notify) {
       try { onClose(); } finally {

@@ -3,7 +3,7 @@ const paths={
  upload:'<path d="M12 16V3m-5 5 5-5 5 5M4 15v5h16v-5"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',
  list:'<path d="M4 5h16M4 10h16M4 15h10"/><circle cx="5" cy="20" r=".8"/><circle cx="10" cy="20" r=".8"/><circle cx="15" cy="20" r=".8"/>',
- more:'<circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>',
+ more:'<g fill="currentColor" stroke="none"><circle cx="5" cy="12" r="2.3"/><circle cx="12" cy="12" r="2.3"/><circle cx="19" cy="12" r="2.3"/></g>',
  compass:'<circle cx="12" cy="12" r="9"/><path d="m16 8-2.5 5.5L8 16l2.5-5.5L16 8Z"/>',
  grid:'<rect x="4" y="4" width="6" height="6" rx="1"/><rect x="14" y="4" width="6" height="6" rx="1"/><rect x="4" y="14" width="6" height="6" rx="1"/><rect x="14" y="14" width="6" height="6" rx="1"/>',
  library:'<path d="M4 4v16M9 4v16M14 4v16m3-15 4 14"/>',

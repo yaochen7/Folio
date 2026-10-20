@@ -20,7 +20,7 @@ function readLibraryView(){try{const value=JSON.parse(localStorage.getItem('foli
 const libraryView=readLibraryView();
 function saveLibraryView(){try{localStorage.setItem('folio.library.view.v1',JSON.stringify(libraryView));}catch{}}
 const state={homeGenre:'All',catalog:[...originalBooks],books:[...originalBooks],publications:[],acquired:[],cloudOwned:new Set(),publicationsLoading:false,ownedLoading:false,publishDraft:{},publishResult:null,publishing:false,publishError:'',user:null,firebase:'loading',googleSignInEnabled:false,emailSignUpEnabled:false,saved:new Set(),progress:{},mutations:{},lastRoute:'#discover',searchQuery:'',searchReturnRoute:'#discover',detailReturnRoute:'#discover',readerBook:null,authMode:'signin',authBusy:false,cloudError:false};
-let libraryUnsubscribe,progressUnsubscribe,publicationUnsubscribe,ownedUnsubscribe,toastTimer,ignoreReaderClose=false,authGeneration=0,identityGeneration=0,pendingRouteFocus,accountReturnFocus,draftTimer,shareRequest=0;
+let libraryUnsubscribe,progressUnsubscribe,publicationUnsubscribe,ownedUnsubscribe,toastTimer,lastActionTarget,ignoreReaderClose=false,authGeneration=0,identityGeneration=0,pendingRouteFocus,accountReturnFocus,draftTimer,shareRequest=0;
 const pendingProgress=new Map();
 const syncingLibrary=new Map();
 const membership=createMembershipService();
@@ -107,8 +107,9 @@ function loadCache(uid){const cache=readCache(uid);state.saved=new Set(cache.sav
 loadCache(null);
 const getBook=id=>state.books.find(book=>book.id===id);
 // The toast joins the top layer, inside any open modal so it stays readable and announced.
-function showToast(){const host=[...document.querySelectorAll('dialog[open]')].pop()||document.body;if(toastElement.parentElement!==host)host.append(toastElement);toastElement.hidden=false;toastElement.hidePopover?.();toastElement.showPopover?.();}
-function notify(message){clearTimeout(toastTimer);toastElement.textContent=message;showToast();toastTimer=setTimeout(()=>{toastElement.hidePopover?.();toastElement.hidden=true;},3600);}
+// It moves up rather than cover the control it confirms near the bottom of the screen.
+function showToast(target){const host=[...document.querySelectorAll('dialog[open]')].pop()||document.body;if(toastElement.parentElement!==host)host.append(toastElement);if(target!==undefined){const a=target?.isConnected&&host.contains(target)&&target.getBoundingClientRect();toastElement.classList.toggle('toast-top',Boolean(a&&a.bottom>innerHeight-96&&a.top<innerHeight));}toastElement.hidden=false;toastElement.hidePopover?.();toastElement.showPopover?.();}
+function notify(message){clearTimeout(toastTimer);toastElement.textContent=message;const target=lastActionTarget;lastActionTarget=null;showToast(target);toastTimer=setTimeout(()=>{toastElement.hidePopover?.();toastElement.hidden=true;},3600);}
 function navigate(hash,{focus,...options}={}){if(focus)pendingRouteFocus=focus;navigation.navigate(hash,options);}
 function focusMain(){const target=main.querySelector('h1')||main;target.setAttribute('tabindex','-1');target.focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
 function isSearchRoute(hash=location.hash){return hash==='#search'||hash.startsWith('#search?');}
@@ -158,11 +159,11 @@ function renderHome(){
 }
 function renderDetails(id){
  const book=getBook(id);if(!book){if(id?.startsWith('b-')&&(state.firebase==='loading'||state.publicationsLoading||state.ownedLoading))main.innerHTML='<section class="publisher-view"><h1>Opening your book…</h1><p role="status">Finding your library.</p></section>';else renderNotFound();return;}
- const saved=state.saved.has(id),progress=state.progress[id]?.fraction||0,edition=presentation(book),opening=book.chapters[0],first=opening?.paragraphs[0]||'';
+ const saved=state.saved.has(id),progress=state.progress[id]?.fraction||0,edition=presentation(book),opening=book.chapters[0],first=opening?.paragraphs[0]||'',lead=first.match(/^[\p{Pi}\p{Ps}"']*\S/u)?.[0]||first.charAt(0);
  document.querySelector('.folio-glow').style.setProperty('--edition-tint',edition.tint);
  const words=book.chapters.flatMap(chapter=>chapter.paragraphs).join(' ').trim().split(/\s+/).length;
  main.innerHTML=`<section class="detail-view"><div class="detail-layout"><div class="detail-art"><div class="detail-cover">${renderCover(book)}<span class="cover-sheen" aria-hidden="true"></span></div></div><div class="detail-copy"><p class="eyebrow">${esc(book.genre)}</p><h1>${esc(book.title)}</h1><p class="detail-author">${esc(book.author)}</p><p class="detail-description">${esc(edition.blurb)}</p><div class="detail-meta"><span>${esc(book.category||'Fiction')}</span>${Number.isFinite(book.pages)?`<span>${book.pages} pages</span>`:''}<span>${Math.max(1,Math.ceil(words/230))} min read</span></div><div class="action-row"><button class="pill" type="button" data-action="read" data-book="${esc(id)}">${progress>0.001?'Continue reading':'Read sample'}</button><button class="glass-button save-text" type="button" data-action="save" data-book="${esc(id)}" aria-pressed="${saved}">${icon(saved?'check':'plus')} <span>${saved?'In My Library':'Want to Read'}</span></button></div>${progress>0.001?`<p class="detail-progress">${Math.round(progress*100)}% read <button type="button" data-action="restart" data-book="${esc(id)}">Start over</button></p>`:''}</div></div>
- <section class="opening-lines" aria-labelledby="opening-title"><div class="opening-heading"><h2 id="opening-title">Opening lines.</h2><span>Chapter One · ${esc(opening?.title||'')}</span></div><div class="excerpt-paper"><div class="excerpt-text"><p><span class="drop-cap">${esc(first.charAt(0))}</span>${esc(first.slice(1))}</p>${(opening?.paragraphs.slice(1,3)||[]).map(paragraph=>`<p>${esc(paragraph)}</p>`).join('')}</div><div class="excerpt-fade"><button type="button" data-action="read" data-book="${esc(id)}">Keep reading</button></div></div></section>
+ <section class="opening-lines" aria-labelledby="opening-title"><div class="opening-heading"><h2 id="opening-title">Opening lines.</h2><span>Chapter One · ${esc(opening?.title||'')}</span></div><div class="excerpt-paper"><div class="excerpt-text"><p><span class="drop-cap">${esc(lead)}</span>${esc(first.slice(lead.length))}</p>${(opening?.paragraphs.slice(1,3)||[]).map(paragraph=>`<p>${esc(paragraph)}</p>`).join('')}</div><div class="excerpt-fade"><button type="button" data-action="read" data-book="${esc(id)}">Keep reading</button></div></div></section>
  <section class="detail-related"><h2>More from Folio.</h2><div class="book-grid related-grid">${state.catalog.filter(item=>item.id!==id).sort((a,b)=>(b.category===book.category)-(a.category===book.category)).slice(0,4).map(bookCard).join('')}</div></section></section>`;
  const readButton=main.querySelector('.detail-copy [data-action="read"]');
  readButton.textContent=progress>0.001?'Continue reading':canReadFull(book)?'Start reading':'Read free preview';
@@ -350,11 +351,15 @@ function placeLibraryMenu(menu){
 document.addEventListener('toggle',event=>{
  const menu=event.target;if(!menu.matches?.('.library-menu')||!menu.open)return;
  for(const other of document.querySelectorAll('.library-menu[open]'))if(other!==menu)other.open=false;
+ // A keyboard-opened trigger under the glass header scrolls clear first; scroll-padding keeps it below the header.
+ const trigger=menu.querySelector('summary'),headerBottom=document.querySelector('.folio-nav-surface')?.getBoundingClientRect().bottom||0,rect=trigger.getBoundingClientRect();
+ if(rect.bottom<headerBottom+4||rect.top>innerHeight)trigger.scrollIntoView({block:'nearest',behavior:'instant'});
  placeLibraryMenu(menu);
 },true);
 window.addEventListener('resize',()=>{for(const menu of document.querySelectorAll('.library-menu[open]'))placeLibraryMenu(menu);});
 window.addEventListener('scroll',()=>{for(const menu of document.querySelectorAll('.library-menu[open]'))placeLibraryMenu(menu);},{passive:true});
 document.addEventListener('click',async event=>{
+ lastActionTarget=event.target.closest?.('button,a,summary');
  for(const menu of document.querySelectorAll('.library-menu[open]'))if(!menu.contains(event.target))menu.open=false;
  const navLink=event.target.closest('a[href^="#"]:not([data-action])');
  if(navLink&&!event.defaultPrevented&&event.button===0&&!event.metaKey&&!event.ctrlKey&&!event.shiftKey&&!event.altKey&&/^#(?:home|discover|collections|library|account|publish|browse|search(?:\?|$)|book\/|read\/|shared\/)/.test(navLink.getAttribute('href'))){event.preventDefault();if(navLink.matches('.nav-back'))navigation.backTo(state.detailReturnRoute);else navigate(navLink.getAttribute('href'),{source:navLink});return;}
@@ -385,7 +390,7 @@ document.addEventListener('click',async event=>{
  else if(action==='resume-membership')setMembershipRenewal(true);
  else if(action==='reset-account-password'){openAccount();state.authMode='reset';renderAccount();document.querySelector('#auth-email').value=state.user?.email||'';}
  else if(action==='close-account')dialog.close();
- else if(action==='auth-mode'){if(state.authBusy)return;state.authMode=button.dataset.mode==='signup'&&!state.emailSignUpEnabled?'signin':button.dataset.mode;renderAccount('',false,true);document.querySelector('#auth-name,#auth-email')?.focus();}
+ else if(action==='auth-mode'){if(state.authBusy)return;state.authMode=button.dataset.mode==='signup'&&!state.emailSignUpEnabled?'signin':button.dataset.mode;renderAccount('',false,true);document.querySelector('#account-content').scrollTop=0;const field=document.querySelector('#auth-name,#auth-email');field?.focus({preventScroll:true});field?.scrollIntoView({block:'nearest'});}
  else if(action==='retry-sync'){if(state.user){handleAuth(state.user);renderAccount();notify('Syncing your library…');}}
  else if(action==='account-library'){dialog.close();navigate('#library');}
  else if(action==='signout'){flushProgress();try{await cloud.signOut();dialog.close();notify('You’ve signed out. You can keep reading as a guest.');}catch(error){notify(error.message||'Sign out didn’t finish. Please try again.');}}
@@ -397,7 +402,8 @@ searchInput.addEventListener('keydown',event=>{if(event.key==='Escape'){event.pr
 dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
 dialog.addEventListener('close',()=>{if(!state.readerBook&&(dialog.contains(document.activeElement)||document.activeElement===document.body))(accountReturnFocus?.isConnected?accountReturnFocus:document.querySelector('.account-button')).focus({preventScroll:true});});
 document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;for(const menu of document.querySelectorAll('.library-menu[open]')){menu.open=false;menu.querySelector('summary')?.focus({preventScroll:true});}});
-document.addEventListener('close',event=>{if(!toastElement.hidden&&event.target.contains?.(toastElement))showToast();},true);
+// Opening or closing a modal re-hosts a visible toast, so it stays above the newest modal.
+const toastHost=new MutationObserver(()=>{if(!toastElement.hidden)showToast();});for(const element of document.querySelectorAll('dialog'))toastHost.observe(element,{attributes:true,attributeFilter:['open']});
 const shareDialog=document.querySelector('#share-dialog');
 shareDialog.addEventListener('close',()=>{if(shareReturnFocus?.isConnected)shareReturnFocus.focus({preventScroll:true});});
 shareDialog.addEventListener('click',event=>{if(event.target!==shareDialog)return;const rect=shareDialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)shareDialog.close();});
