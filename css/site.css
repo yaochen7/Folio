@@ -8,6 +8,11 @@ button,input,select{font:inherit}button,a{touch-action:manipulation}button{curso
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;margin:-1px;padding:0;border:0}
 .skip-link{position:fixed;z-index:2000;top:-100px;left:16px;padding:10px 18px;background:#fff;color:#141c33;border-radius:24px}.skip-link:focus{top:16px}
 .folio-shell{position:relative;min-height:100svh;isolation:isolate}
+.folio-workspace{overflow-x:clip}
+/* Outgoing content is a clipped, inert snapshot; the live page stays usable. */
+.route-layer{position:fixed;inset:0;z-index:20;overflow:hidden;pointer-events:none;contain:strict}
+.route-snapshot,.route-snapshot *,.route-snapshot *::before,.route-snapshot *::after{animation:none!important;transition:none!important;pointer-events:none!important}
+#main-content[data-navigation]{will-change:transform,opacity}
 .folio-backdrop{position:fixed;inset:0;z-index:-2;pointer-events:none;background:radial-gradient(120% 60% at 50% 100%,#ff6a2b 0%,rgb(255 106 43 / 0) 55%),radial-gradient(80% 50% at 15% 85%,#f2a65a 0%,rgb(242 166 90 / 0) 60%),radial-gradient(70% 45% at 90% 70%,#c2364a 0%,rgb(194 54 74 / 0) 60%),radial-gradient(90% 60% at 70% 10%,#4a5fa8 0%,rgb(74 95 168 / 0) 65%),linear-gradient(180deg,#141c33 0%,#2a2f5a 45%,#6b3f5e 75%,#b8543c 100%)}
 .folio-glow{position:fixed;inset:-10%;z-index:-1;pointer-events:none;background:radial-gradient(48% 42% at 27% 30%,color-mix(in srgb,var(--edition-tint,#ff7a4d) 70%,transparent),transparent 70%);opacity:0;transition:opacity .8s ease}
 body[data-page="book"] .folio-glow{opacity:1}

@@ -2,6 +2,7 @@ import {books as originalBooks,renderCover,escapeHtml as esc} from './books.js';
 import {icon,hydrateIcons} from './icons.js';
 import {collections,presentation} from './presentation.js';
 import {createReader} from './reader.js';
+import {createNavigation} from './navigation.js';
 import * as cloud from './firebase-service.js';
 
 const main=document.querySelector('#main-content');
@@ -12,7 +13,6 @@ const searchInput=document.querySelector('#book-search');
 function readLibraryView(){try{const value=JSON.parse(localStorage.getItem('folio.library.view.v1')||'{}');return{layout:value.layout==='list'?'list':'grid',sort:value.sort==='title'?'title':'recent'};}catch{return{layout:'grid',sort:'recent'};}}
 const libraryView=readLibraryView();
 function saveLibraryView(){try{localStorage.setItem('folio.library.view.v1',JSON.stringify(libraryView));}catch{}}
-const compactNavigation=matchMedia('(max-width:760px)');
 const state={homeGenre:'All',books:[...originalBooks],user:null,firebase:'loading',googleSignInEnabled:false,emailSignUpEnabled:false,saved:new Set(),progress:{},mutations:{},lastRoute:'#discover',searchQuery:'',searchReturnRoute:'#discover',detailReturnRoute:'#discover',readerBook:null,authMode:'signin',authBusy:false,cloudError:false};
 let libraryUnsubscribe,progressUnsubscribe,toastTimer,ignoreReaderClose=false,authGeneration=0,pendingRouteFocus,accountReturnFocus;
 const pendingProgress=new Map();
@@ -24,7 +24,7 @@ function loadCache(uid){const cache=readCache(uid);state.saved=new Set(cache.sav
 loadCache(null);
 const getBook=id=>state.books.find(book=>book.id===id);
 function notify(message){clearTimeout(toastTimer);toastElement.textContent=message;toastElement.hidden=false;toastTimer=setTimeout(()=>toastElement.hidden=true,3600);}
-function navigate(hash,{focus}={}){if(focus)pendingRouteFocus=focus;if(location.hash===hash)renderRoute();else location.hash=hash;}
+function navigate(hash,{focus,...options}={}){if(focus)pendingRouteFocus=focus;navigation.navigate(hash,options);}
 function focusMain(){const target=main.querySelector('h1')||main;target.setAttribute('tabindex','-1');target.focus({preventScroll:true});window.scrollTo({top:0,behavior:'instant'});}
 function isSearchRoute(hash=location.hash){return hash==='#search'||hash.startsWith('#search?');}
 function searchHash(){return state.searchQuery?'#search?q='+encodeURIComponent(state.searchQuery):'#search';}
@@ -89,8 +89,9 @@ const reader=createReader({root:document.querySelector('#reader-root'),onProgres
  if(!Number.isFinite(progress.wordOffset)||!Number.isFinite(progress.fraction))return;
  const value={wordOffset:Math.max(0,Math.floor(progress.wordOffset)),fraction:Math.min(1,Math.max(0,progress.fraction)),updatedAt:Date.now()};
  state.progress[id]=value;persistCache();queueProgress(id,value);
-},onClose:()=>{if(ignoreReaderClose)return;state.readerBook=null;navigate(state.lastRoute.startsWith('#read/')?'#discover':state.lastRoute);}});
-function renderRoute(){
+},onClose:()=>{if(ignoreReaderClose)return;state.readerBook=null;navigation.backTo(state.lastRoute.startsWith('#read/')?'#discover':state.lastRoute);}});
+const navigation=createNavigation({main,render:renderRoute,captureState:()=>({homeGenre:state.homeGenre,detailReturnRoute:state.detailReturnRoute}),restoreState:saved=>{if(saved){state.homeGenre=saved.homeGenre;state.detailReturnRoute=saved.detailReturnRoute;}}});
+function renderRoute({restored=false,samePage=false}={}){
  const hash=location.hash||'#home';
  document.body.dataset.page=hash.startsWith('#book/')?'book':hash==='#library'?'library':isSearchRoute(hash)||hash==='#browse'?'search':'home';
  const previousFocus=document.activeElement;
@@ -101,12 +102,12 @@ function renderRoute(){
  state.lastRoute=hash;
  document.title='Folio — A world between the covers';
  document.querySelectorAll('[data-nav]').forEach(link=>{const active=hash==='#collections'?link.dataset.nav==='collections':hash==='#discover'||hash.startsWith('#book/')?link.dataset.nav==='discover':false;if(active)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');});
- if(hash.startsWith('#read/')){setSearch(false);renderNotFound();document.title='Book not found — Folio';focusMain();}
- else if(hash==='#library'){setSearch(false);renderLibrary();focusMain();}
- else if(hash.startsWith('#book/')){setSearch(false);let id;try{id=decodeURIComponent(hash.slice(6));}catch{}renderDetails(id);focusMain();const book=getBook(id);if(book)document.title=`${book.title} — Folio`;}
- else if(isSearchRoute(hash)){state.searchQuery=new URLSearchParams(hash.split('?').slice(1).join('?')).get('q')||'';setSearch(true,{focus:true});renderSearch();}
- else if(hash==='#browse'){setSearch(false);renderSearch();focusMain();}
- else{setSearch(false);const focusContent=main.contains(previousFocus)||previousFocus===document.body;renderHome();if(hash==='#collections'||hash==='#discover')requestAnimationFrame(()=>{const collection=document.querySelector(hash==='#collections'?'#collections':'#collection');const heading=collection?.querySelector('h2');if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}collection?.scrollIntoView({behavior:matchMedia('(prefers-reduced-motion: reduce)').matches?'instant':'smooth',block:'start'});});else if(focusContent)focusMain();else window.scrollTo({top:0,behavior:'instant'});}
+ if(hash.startsWith('#read/')){setSearch(false);renderNotFound();document.title='Book not found — Folio';if(!restored)focusMain();}
+ else if(hash==='#library'){setSearch(false);renderLibrary();if(!restored)focusMain();}
+ else if(hash.startsWith('#book/')){setSearch(false);let id;try{id=decodeURIComponent(hash.slice(6));}catch{}renderDetails(id);if(!restored)focusMain();const book=getBook(id);if(book)document.title=`${book.title} — Folio`;}
+ else if(isSearchRoute(hash)){state.searchQuery=new URLSearchParams(hash.split('?').slice(1).join('?')).get('q')||'';setSearch(true,{focus:!restored});renderSearch();if(!restored)window.scrollTo({top:0,behavior:'instant'});}
+ else if(hash==='#browse'){setSearch(false);renderSearch();if(!restored)focusMain();}
+ else{setSearch(false);const focusContent=main.contains(previousFocus)||previousFocus===document.body;renderHome();if(!restored){if(hash==='#collections'||hash==='#discover'){const collection=document.querySelector(hash==='#collections'?'#collections':'#collection');const heading=collection?.querySelector('h2');if(heading){heading.tabIndex=-1;heading.focus({preventScroll:true});}collection?.scrollIntoView({behavior:samePage&&!matchMedia('(prefers-reduced-motion: reduce)').matches?'smooth':'instant',block:'start'});}else if(focusContent)focusMain();else window.scrollTo({top:0,behavior:samePage?'smooth':'instant'});}}
  updateHeader();
  if(pendingRouteFocus){const target=pendingRouteFocus;pendingRouteFocus=null;if(target.isConnected)target.focus({preventScroll:true});}
 }
@@ -132,7 +133,7 @@ async function handleAuth(user){
  let closedBook=null;
  if(identityChanged&&state.readerBook){closedBook=state.readerBook;ignoreReaderClose=true;reader.close();ignoreReaderClose=false;state.readerBook=null;}
  state.user=user;state.cloudError=false;loadCache(user?.uid);updateHeader();
- if(closedBook){history.replaceState(null,'','#book/'+encodeURIComponent(closedBook));renderRoute();}
+ if(closedBook)navigate('#book/'+encodeURIComponent(closedBook),{replace:true});
  if(dialog.open)renderAccount('',false,!user);
  if(!state.readerBook)refreshRouteContent();else refreshSavedControls();
  if(!user)return;
@@ -221,10 +222,10 @@ window.addEventListener('resize',()=>{for(const menu of document.querySelectorAl
 window.addEventListener('scroll',()=>{for(const menu of document.querySelectorAll('.library-menu[open]'))placeLibraryMenu(menu);},{passive:true});
 document.addEventListener('click',async event=>{
  for(const menu of document.querySelectorAll('.library-menu[open]'))if(!menu.contains(event.target))menu.open=false;
- const navLink=event.target.closest('[data-nav]');
- if(navLink&&compactNavigation.matches&&!event.defaultPrevented&&event.button===0&&!event.metaKey&&!event.ctrlKey&&!event.shiftKey&&!event.altKey){event.preventDefault();navigate(navLink.getAttribute('href'),{focus:main});return;}
+ const navLink=event.target.closest('a[href^="#"]:not([data-action])');
+ if(navLink&&!event.defaultPrevented&&event.button===0&&!event.metaKey&&!event.ctrlKey&&!event.shiftKey&&!event.altKey&&/^#(?:home|discover|collections|library|browse|search(?:\?|$)|book\/|read\/)/.test(navLink.getAttribute('href'))){event.preventDefault();if(navLink.matches('.nav-back'))navigation.backTo(state.detailReturnRoute);else navigate(navLink.getAttribute('href'),{source:navLink});return;}
  const button=event.target.closest('[data-action]');if(!button)return;const action=button.dataset.action,id=button.dataset.book;
- if(action==='detail'){if(!location.hash.startsWith('#book/')&&!location.hash.startsWith('#read/'))state.detailReturnRoute=location.hash||'#discover';navigate('#book/'+encodeURIComponent(id));}
+ if(action==='detail'){if(!location.hash.startsWith('#book/')&&!location.hash.startsWith('#read/'))state.detailReturnRoute=location.hash||'#home';navigate('#book/'+encodeURIComponent(id),{source:button});}
  else if(action==='read'){state.lastRoute=location.hash&&!location.hash.startsWith('#read/')?location.hash:'#book/'+id;navigate('#read/'+encodeURIComponent(id));}
  else if(action==='save')toggleSave(id);
  else if(action==='library-layout'){libraryView.layout=libraryView.layout==='grid'?'list':'grid';saveLibraryView();renderPreservingFocus(renderLibrary);}
@@ -235,7 +236,7 @@ document.addEventListener('click',async event=>{
  else if(action==='browse')navigate('#browse');
  else if(action==='search'){if(searchBar.hidden)openSearch();else closeSearch();}
  else if(action==='close-search')closeSearch();
- else if(action==='clear-search'){state.searchQuery='';history.replaceState(null,'',searchHash());setSearch(true,{focus:true});renderSearch();}
+ else if(action==='clear-search'){state.searchQuery='';navigation.replaceHash(searchHash());setSearch(true,{focus:true});renderSearch();}
  else if(action==='account')openAccount();
  else if(action==='close-account')dialog.close();
  else if(action==='auth-mode'){if(state.authBusy)return;state.authMode=button.dataset.mode==='signup'&&!state.emailSignUpEnabled?'signin':button.dataset.mode;renderAccount('',false,true);document.querySelector('#auth-name,#auth-email')?.focus();}
@@ -245,16 +246,15 @@ document.addEventListener('click',async event=>{
  else if(action==='google')googleAuth();
  else if(action==='restart'){state.progress[id]={wordOffset:0,fraction:0,updatedAt:Date.now()};persistCache();queueProgress(id,state.progress[id]);navigate('#read/'+encodeURIComponent(id));}
 });
-searchInput.addEventListener('input',()=>{state.searchQuery=searchInput.value;if(!isSearchRoute())navigate(searchHash());else{history.replaceState(null,'',searchHash());renderSearch();}});
+searchInput.addEventListener('input',()=>{state.searchQuery=searchInput.value;if(!isSearchRoute())navigate(searchHash());else{navigation.replaceHash(searchHash());renderSearch();}});
 searchInput.addEventListener('keydown',event=>{if(event.key==='Escape'){event.preventDefault();closeSearch();}});
 dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog.getBoundingClientRect();if(event.clientX<r.left||event.clientX>r.right||event.clientY<r.top||event.clientY>r.bottom)dialog.close();}});
 dialog.addEventListener('close',()=>{if(!state.readerBook&&(dialog.contains(document.activeElement)||document.activeElement===document.body))(accountReturnFocus?.isConnected?accountReturnFocus:document.querySelector('.account-button')).focus({preventScroll:true});});
 document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;for(const menu of document.querySelectorAll('.library-menu[open]')){menu.open=false;menu.querySelector('summary')?.focus({preventScroll:true});}});
-window.addEventListener('hashchange',renderRoute);
 window.addEventListener('pagehide',flushProgress);
 window.addEventListener('online',()=>{if(state.user){const user=state.user;handleAuth(user);for(const [id,progress]of Object.entries(state.progress))queueProgress(id,progress);}});
 document.querySelector('.skip-link').addEventListener('click',event=>{event.preventDefault();main.focus({preventScroll:true});main.scrollIntoView({block:'start',behavior:'instant'});});
-hydrateIcons();renderRoute();
+hydrateIcons();navigation.start();
 cloud.subscribeAuth(handleAuth);
 cloud.initFirebase().then(async result=>{state.firebase=result.configured&&!result.error?'ready':'unavailable';state.googleSignInEnabled=result.googleSignInEnabled!==false;state.emailSignUpEnabled=result.emailSignUpEnabled!==false;if(dialog.open&&!state.user)renderAccount('',false,true);if(result.configured){try{const records=await cloud.getCatalog();if(records?.length){const remote=records.map(normalizeRemote).filter(Boolean),map=new Map(originalBooks.map(book=>[book.id,book]));remote.forEach(book=>map.set(book.id,book));state.books=[...map.values()];refreshRouteContent();}}catch{}}}).catch(()=>{state.firebase='unavailable';if(dialog.open)renderAccount('',false,true);});
 

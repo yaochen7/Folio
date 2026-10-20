@@ -39,6 +39,8 @@ Folio uses dedicated `/folioCatalog` and `/folioUsers/{uid}` collections. An aut
 
 `npm run check` checks source syntax, configuration, and Firebase adapter behavior. `TEST_PLAN.md` describes browser journeys. Adapter checks do not verify deployed Firestore rules or real authentication providers. Live Firebase verification requires the project configuration and authorized access.
 
+With the dev server running and Playwright installed, `npm run check:navigation` exercises animated book returns, restored shelf position and focus, browser Back/Forward, search, interrupted navigation, and reduced motion at phone and desktop widths. It uses isolated guest contexts with Firebase configuration disabled. Set `FOLIO_TEST_URL` to test another server, or `PLAYWRIGHT_MODULE` and `BROWSER_EXECUTABLE` to use an existing Playwright/Chromium installation.
+
 ## Hosting
 
 Folio targets **Firebase Hosting** in **Xilo Web Systems** (`xilo-web-systems`). The checked-in `.firebaserc` maps target `folio` to site `xilo-folio`. Build before deployment:
