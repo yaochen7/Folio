@@ -85,7 +85,14 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    await openMenu(page);
    for(const viewport of [{width:844,height:390},{width:568,height:300}]){
     await page.setViewportSize(viewport);
-    await page.waitForTimeout(700);
+    await page.waitForFunction(size=>document.querySelector('.fr-liquid-surface').style.getPropertyValue('--fr-control-size')===`${size}px`,viewport.height<320?44:52);
+    await page.waitForFunction(()=>[...document.querySelectorAll('.fr-liquid-actions .fr-liquid-item')].every((e,index)=>{
+     const match=e.style.transform.match(/translate\(([-\d.]+)px, ([-\d.]+)px/);
+     if(!match)return false;
+     const left=parseFloat(e.style.left),top=parseFloat(e.style.top);
+     const x=index<3?-left:-left*(6-index)/3,y=index<3?-top*(3-index)/3:0;
+     return Math.abs(Number(match[1])-x)<.25&&Math.abs(Number(match[2])-y)<.25;
+    }));
     assert.ok(await page.evaluate(()=>{
      const bounds=[...document.querySelectorAll('.fr-controls-host button')].map(e=>e.getBoundingClientRect());
      return bounds.every(r=>r.left>=47+12&&r.right<=innerWidth-47-12&&r.top>=16&&r.bottom<=innerHeight-21-12&&r.width>=44&&r.height>=44)&&bounds.every((r,i)=>bounds.every((s,j)=>i===j||Math.max(s.left-r.right,r.left-s.right,s.top-r.bottom,r.top-s.bottom)>=18));
