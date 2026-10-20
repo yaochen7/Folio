@@ -33,6 +33,80 @@ service cloud.firestore {
         && data.updatedAt == request.time;
     }
 
+    // FOLIO PUBLICATIONS BEGIN: merge this block into the active shared policy.
+    function folioPublicationOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function folioPublicationId(bookId) {
+      return bookId.matches('^b-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$');
+    }
+
+    function folioPublicationToken(token) {
+      return token is string && token.matches('^[0-9a-f]{64}$');
+    }
+
+    function folioPublicationValid(data, bookId) {
+      return folioPublicationId(bookId)
+        && data.keys().hasAll(['bookId', 'ownerUid', 'title', 'author', 'genre', 'kind', 'kicker',
+          'description', 'category', 'priceCents', 'contentJson', 'publishedAt'])
+        && data.bookId == bookId
+        && data.ownerUid is string && data.ownerUid.size() > 0 && data.ownerUid.size() <= 128
+        && folioPublicationOwner(data.ownerUid)
+        && data.title is string && data.title.size() > 0 && data.title.size() <= 200
+        && data.author is string && data.author.size() > 0 && data.author.size() <= 120
+        && data.genre is string && data.genre.size() <= 80
+        && data.kind in ['shape', 'atlas', 'blue-hour', 'wild', 'slowly', 'tomorrow']
+        && data.kicker is string && data.kicker.size() <= 80
+        && data.description is string && data.description.size() <= 3000
+        && data.category is string && data.category.size() <= 80
+        && data.priceCents is int && data.priceCents >= 99 && data.priceCents <= 99999
+        && data.contentJson is string && data.contentJson.size() > 2
+        && data.contentJson.toUtf8().size() <= 450000
+        && data.publishedAt == request.time;
+    }
+
+    match /folioUsers/{uid}/publications/{bookId} {
+      allow read: if folioPublicationOwner(uid);
+      // Both immutable copies must be created together. A published link remains durable.
+      allow create: if folioPublicationOwner(uid) && folioPublicationValid(request.resource.data, bookId)
+        && request.resource.data.ownerUid == uid
+        && request.resource.data.keys().hasOnly(['bookId', 'ownerUid', 'title', 'author', 'genre', 'kind', 'kicker',
+          'description', 'category', 'priceCents', 'contentJson', 'publishedAt', 'shareToken'])
+        && folioPublicationToken(request.resource.data.shareToken)
+        && getAfter(/databases/$(database)/documents/folioCatalog/$(bookId)/shares/$(request.resource.data.shareToken)).data
+          .diff(request.resource.data).affectedKeys().hasOnly(['shareToken']);
+      allow update, delete: if false;
+    }
+
+    match /folioCatalog/{bookId}/shares/{shareToken} {
+      // An exact unguessable link is the capability; collections cannot be enumerated.
+      allow get: if folioPublicationId(bookId) && folioPublicationToken(shareToken);
+      allow list: if false;
+      allow create: if folioPublicationValid(request.resource.data, bookId)
+        && request.resource.data.keys().hasOnly(['bookId', 'ownerUid', 'title', 'author', 'genre', 'kind', 'kicker',
+          'description', 'category', 'priceCents', 'contentJson', 'publishedAt'])
+        && folioPublicationToken(shareToken)
+        && getAfter(/databases/$(database)/documents/folioUsers/$(request.auth.uid)/publications/$(bookId)).data.shareToken == shareToken
+        && getAfter(/databases/$(database)/documents/folioUsers/$(request.auth.uid)/publications/$(bookId)).data
+          .diff(request.resource.data).affectedKeys().hasOnly(['shareToken']);
+      allow update, delete: if false;
+    }
+
+    match /folioUsers/{uid}/owned/{bookId} {
+      allow read: if folioPublicationOwner(uid);
+      allow create: if folioPublicationOwner(uid) && folioPublicationId(bookId)
+        && request.resource.data.keys().hasAll(['bookId', 'shareToken', 'source', 'acquiredAt'])
+        && request.resource.data.keys().hasOnly(['bookId', 'shareToken', 'source', 'acquiredAt'])
+        && request.resource.data.bookId == bookId
+        && request.resource.data.source == 'shared'
+        && folioPublicationToken(request.resource.data.shareToken)
+        && request.resource.data.acquiredAt == request.time
+        && exists(/databases/$(database)/documents/folioCatalog/$(bookId)/shares/$(request.resource.data.shareToken));
+      allow update, delete: if false;
+    }
+    // FOLIO PUBLICATIONS END
+
     match /folioCatalog/{bookId} {
       // Publish with the Firebase console or a trusted Admin SDK process (IAM).
       // Browser accounts, including users who add an 'admin' field, cannot write here.

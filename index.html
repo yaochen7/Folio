@@ -15,6 +15,7 @@
   <link rel="stylesheet" href="./css/site.css">
   <link rel="stylesheet" href="./css/reader.css">
   <link rel="stylesheet" href="./css/membership.css">
+  <link rel="stylesheet" href="./css/publishing.css">
   <script type="module" src="./js/app.js"></script>
 </head>
 <body>
@@ -40,6 +41,7 @@
   <div id="reader-root"></div>
   <dialog id="account-dialog" class="folio-glass" aria-labelledby="account-title"><div id="account-content"></div></dialog>
   <dialog id="membership-dialog" class="folio-glass" aria-labelledby="membership-dialog-title"><div class="membership-content"></div></dialog>
+  <dialog id="share-dialog" class="folio-glass" aria-labelledby="share-book-title"><button class="membership-close icon-button" type="button" data-action="close-share" aria-label="Close share"><span data-icon="x" aria-hidden="true"></span></button><p class="eyebrow">A story is better shared.</p><h2 id="share-book-title">Share your book</h2><p>Anyone with this link owns the book and can read every chapter. No account needed.</p><label class="publisher-field">Book link<input id="share-book-link" type="url" readonly></label><button class="pill" type="button" data-action="copy-share-link">Copy link</button></dialog>
   <div class="toast" id="folio-toast" role="status" aria-live="polite" hidden></div>
   <noscript><p class="noscript-message">Folio needs JavaScript to open books and keep your reading place.</p></noscript>
 </body>
