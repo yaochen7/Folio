@@ -2,6 +2,7 @@ import { icon } from './icons.js';
 import { renderCover } from './books.js';
 import { curlShape, dragProgress, completesTurn, settleProgress } from './page-curl.js';
 import { createPageCurlRenderer } from './page-curl-renderer.js';
+import { createReadingControls } from './reader-controls.js';
 
 const STORAGE_KEY = 'folio.reader.settings.v1';
 const DEFAULT_SETTINGS = { fontSize: 19, theme: 'sepia', spread: true };
@@ -43,7 +44,7 @@ function normalizeBook(book) {
 }
 
 /**
- * A local, dependency-free reader. Book body words are the canonical location unit.
+ * A local reader with a React liquid-controls island. Words are the location unit.
  * Book: { id, title, author, chapters: [{ title, paragraphs: string[] }] }.
  * A plain-text `contents` or `content` value is also accepted.
  */
@@ -80,25 +81,17 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   root.innerHTML = `
     <section class="fr-reader" role="dialog" aria-modal="true" aria-labelledby="fr-book-title" data-fr-theme="paper">
       <header class="fr-toolbar">
-        <button class="fr-tool fr-close fr-round folio-glass" type="button" data-fr-action="close" aria-label="Close reader">${icon('x')}</button>
-        <button class="fr-title-group fr-menu-toggle" type="button" data-fr-action="menu" aria-label="Reading controls" aria-expanded="false" aria-controls="fr-reader-menu"><span id="fr-book-title" class="fr-book-title"></span><span class="fr-book-author"></span></button>
-        <div class="fr-quick-settings folio-glass" role="group" aria-label="Reading appearance"><div class="fr-quick-themes">${THEMES.map(theme=>`<button class="fr-quick-theme" type="button" data-fr-action="theme" data-fr-theme-option="${theme}" aria-label="${theme[0].toUpperCase()+theme.slice(1)} theme" aria-pressed="false"><span aria-hidden="true"></span></button>`).join('')}</div><div class="fr-quick-font"><button class="fr-quick-size fr-size-button" type="button" data-fr-action="smaller" aria-label="Decrease text size">A</button><button class="fr-quick-size fr-size-button" type="button" data-fr-action="larger" aria-label="Increase text size">A</button></div></div>
+        <div class="fr-title-group"><span id="fr-book-title" class="fr-book-title"></span><span class="fr-book-author"></span></div>
       </header>
       <div class="fr-stage"><div class="fr-book" aria-label="Book pages" aria-busy="true" tabindex="-1"></div></div>
       <footer class="fr-footer">
-        <button class="fr-page-nav fr-round folio-glass" type="button" data-fr-action="previous" aria-label="Previous page">${icon('chevron-left')}</button>
-        <div class="fr-footer-position"><input class="fr-progress-range" type="range" min="0" max="1" step="1" value="0" aria-label="Reading progress"><div class="fr-position-caption"><span class="fr-page-count" aria-label="Reading position"></span><span class="fr-pages-left"></span></div></div>
-        <button class="fr-page-nav fr-round folio-glass" type="button" data-fr-action="next" aria-label="Next page">${icon('chevron-right')}</button>
+        <span class="fr-page-count" aria-label="Reading position"></span><span class="fr-pages-left" hidden></span>
       </footer>
-      <aside class="fr-reader-menu" id="fr-reader-menu" aria-label="Reading controls" hidden>
-        <button class="fr-menu-row fr-contents-toggle folio-glass" type="button" data-fr-action="contents" aria-expanded="false" aria-controls="fr-contents-panel"><span>Contents <span class="fr-menu-percentage"></span></span>${icon('list')}</button>
-        <button class="fr-menu-row fr-search-toggle folio-glass" type="button" data-fr-action="search" aria-expanded="false" aria-controls="fr-search-panel"><span>Search Book</span>${icon('search')}</button>
-        <button class="fr-menu-row fr-appearance-toggle folio-glass" type="button" data-fr-action="appearance" aria-expanded="false" aria-controls="fr-appearance-panel"><span>Themes &amp; Settings</span><span class="fr-aa" aria-hidden="true">Aa</span></button>
-      </aside>
+      <div class="fr-controls-host"></div>
       <aside class="fr-panel fr-contents-panel folio-glass" id="fr-contents-panel" aria-labelledby="fr-contents-heading" hidden>
         <div class="fr-panel-heading"><h2 id="fr-contents-heading">Contents</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close contents">${icon('x')}</button></div>
         <ol class="fr-chapter-list"></ol>
-        <p class="fr-current-chapter"></p>
+        <div class="fr-position-controls"><p class="fr-current-chapter"></p><label class="fr-progress-label" for="fr-progress">Reading progress</label><input id="fr-progress" class="fr-progress-range" type="range" min="0" max="1" step="1" value="0" aria-label="Reading progress"></div>
       </aside>
       <aside class="fr-panel fr-search-panel folio-glass" id="fr-search-panel" aria-labelledby="fr-search-heading" hidden>
         <div class="fr-panel-heading"><h2 id="fr-search-heading">Search Book</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close book search">${icon('x')}</button></div>
@@ -118,19 +111,17 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   const reader = root.querySelector('.fr-reader');
   const stage = root.querySelector('.fr-stage');
   const bookElement = root.querySelector('.fr-book');
-  const closeButton = root.querySelector('.fr-close');
+  let menuButton;
+  const controlsHost=root.querySelector('.fr-controls-host');
+  const controls=createReadingControls(controlsHost,reader);
   const titleElement = root.querySelector('.fr-book-title');
   const authorElement = root.querySelector('.fr-book-author');
   const chapterElement = root.querySelector('.fr-current-chapter');
   const pageCountElement = root.querySelector('.fr-page-count');
   const range = root.querySelector('.fr-progress-range');
   const announcement = root.querySelector('.fr-announcement');
-  const previousButton = root.querySelector('[data-fr-action="previous"]');
-  const nextButton = root.querySelector('[data-fr-action="next"]');
   const contentsPanel = root.querySelector('.fr-contents-panel');
   const appearancePanel = root.querySelector('.fr-appearance-panel');
-  const menuPanel = root.querySelector('.fr-reader-menu');
-  const menuButton = root.querySelector('.fr-menu-toggle');
   const searchPanel = root.querySelector('.fr-search-panel');
   const bookSearch = root.querySelector('.fr-book-search');
   const searchResults = root.querySelector('.fr-search-results');
@@ -369,13 +360,11 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
       ? `Pages ${pageIndex + 1}–${endPage} of ${pages.length}` : `Page ${pageIndex + 1} of ${pages.length}`;
     const left = pages.length - endPage;
     root.querySelector('.fr-pages-left').textContent = left ? `${left} ${left === 1 ? 'page' : 'pages'} left` : 'End of story';
-    root.querySelector('.fr-menu-percentage').textContent = `· ${Math.round(readingFraction() * 100)}%`;
+    controls.update({percentage:Math.round(readingFraction()*100),previousDisabled:!canTurn(-1),nextDisabled:!canTurn(1)});
     range.max = String(Math.max(1, normalized.totalWords - 1));
     range.value = String(pageIndex === lastStartIndex() ? range.max : clamp(anchorOffset, 0, normalized.totalWords - 1));
     range.setAttribute('aria-valuetext', `${chapter.title}, page ${pageIndex + 1} of ${pages.length}`);
     range.style.setProperty('--fr-progress', `${Number(range.value) / Number(range.max) * 100}%`);
-    previousButton.disabled = !canTurn(-1);
-    nextButton.disabled = !canTurn(1);
     chapterList.querySelectorAll('button').forEach(button => {
       if (Number(button.dataset.frChapter) === chapterIndex) button.setAttribute('aria-current', 'true');
       else button.removeAttribute('aria-current');
@@ -448,18 +437,18 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     chromeVisible = visible;
     reader.dataset.frChrome = visible ? 'shown' : 'hidden';
     const toolbar=root.querySelector('.fr-toolbar'),footer=root.querySelector('.fr-footer');
-    if (!visible && (toolbar.contains(document.activeElement) || footer.contains(document.activeElement))) bookElement.focus({ preventScroll: true });
-    toolbar.inert = !visible; footer.inert = !visible;
-    closeButton.inert = !visible; menuButton.inert = !visible;
+    if (!visible && controlsHost.contains(document.activeElement)) bookElement.focus({ preventScroll: true });
+    toolbar.inert = !visible; footer.inert = !visible;controlsHost.inert=!visible;
     updateChrome();
   }
 
-  function activePanel() { return [menuPanel, contentsPanel, appearancePanel, searchPanel].find(panel => !panel.hidden); }
+  function activePanel() { return [contentsPanel, appearancePanel, searchPanel].find(panel => !panel.hidden)||(controls.expanded?controlsHost:null); }
 
   function closePanels(restoreFocus = false) {
     const wasVisible = Boolean(activePanel());
-    const containedFocus = [menuPanel, contentsPanel, appearancePanel, searchPanel].some(panel => panel.contains(document.activeElement));
-    for (const panel of [menuPanel, contentsPanel, appearancePanel, searchPanel]) panel.hidden = true;
+    const containedFocus = [controlsHost, contentsPanel, appearancePanel, searchPanel].some(panel => panel.contains(document.activeElement));
+    for (const panel of [contentsPanel, appearancePanel, searchPanel]) panel.hidden = true;
+    controls.setExpanded(false);
     reader.classList.remove('fr-panel-open');
     root.querySelectorAll('[aria-controls]').forEach(button => button.setAttribute('aria-expanded', 'false'));
     if (restoreFocus && wasVisible) { setChrome(true); menuButton.focus({ preventScroll: true }); }
@@ -468,7 +457,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
 
   function togglePanel(name, trigger) {
-    const panel = name === 'menu' ? menuPanel : name === 'contents' ? contentsPanel : name === 'search' ? searchPanel : appearancePanel;
+    const panel = name === 'contents' ? contentsPanel : name === 'search' ? searchPanel : appearancePanel;
     const show = panel.hidden;
     closePanels(); setChrome(true);
     if (show) {
@@ -648,13 +637,13 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     if (beginTurn(direction)) releaseTurn(true, .4);
   }
 
-  function jumpToOffset(offset, announce = true) {
+  function jumpToOffset(offset, announce = true, {keepPanel=false} = {}) {
     cancelOpening();
     abortTurn();
     anchorOffset = clamp(Number(offset) || 0, 0, Math.max(0, normalized.totalWords - 1));
     pageIndex = pageForOffset(anchorOffset);
     renderBase();
-    closePanels();
+    if(!keepPanel)closePanels();
     updateChrome(announce);
     emitProgress();
   }
@@ -664,7 +653,11 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     if (!button || !root.contains(button)) return;
     const action = button.dataset.frAction;
     if (action === 'close') close();
-    else if (action === 'menu' || action === 'search') { if (action === 'search') searchBook(); togglePanel(action, button); }
+    else if(action==='menu'){
+      const show=!controls.expanded;closePanels();setChrome(true);controls.setExpanded(show);
+      if(show&&event.detail===0)root.querySelector('.fr-contents-toggle')?.focus({preventScroll:true});
+    }
+    else if (action === 'search') { searchBook(); togglePanel(action, button); }
     else if (action === 'search-result') { searchHighlight = bookSearch.value.trim().toLocaleLowerCase(); jumpToOffset(Number(button.dataset.frOffset)); setChrome(false); bookElement.focus({ preventScroll: true }); }
     else if (action === 'previous') requestTurn(-1);
     else if (action === 'next') requestTurn(1);
@@ -781,7 +774,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     if (event.key === 'Tab') {
       setChrome(true);
       const focusable = [...root.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href]')]
-        .filter(element => element.getClientRects().length && !element.closest('[hidden],[inert]'));
+        .filter(element => element.tabIndex>=0&&element.getClientRects().length && !element.closest('[hidden],[inert]'));
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
       if (event.shiftKey && (document.activeElement === first || !root.contains(document.activeElement))) {
@@ -801,7 +794,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
 
   function onFocusIn(event) {
     if (!isOpen) return;
-    if (!root.contains(event.target)) { setChrome(true); closeButton.focus({ preventScroll: true }); return; }
+    if (!root.contains(event.target)) { setChrome(true); menuButton.focus({ preventScroll: true }); return; }
     const panel = activePanel();
     if (panel && !panel.contains(event.target) && event.target !== panelTrigger) closePanels();
   }
@@ -820,7 +813,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     range.style.setProperty('--fr-progress', `${Number(range.value) / Number(range.max) * 100}%`);
   }
 
-  function onRangeChange() { jumpToOffset(Number(range.value)); }
+  function onRangeChange() { jumpToOffset(Number(range.value),true,{keepPanel:!contentsPanel.hidden}); }
   function onReaderPointerDown(event) {
     dismissedPointerId = null;
     const panel = activePanel();
@@ -840,6 +833,10 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   };
   const onDragStart = event => event.preventDefault();
   const onVisibilityChange = () => {
+    if(isOpen){
+      if(document.hidden){closePanels();controls.unmount();}
+      else{controls.mount();menuButton=root.querySelector('.fr-menu-toggle');setChrome(chromeVisible);}
+    }
     if (document.hidden && isOpen && turn) { abortTurn(); renderBase(); updateChrome(); }
   };
   const onMotionChange = () => {
@@ -883,6 +880,8 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     previousFocus = focusBeforeOpen;
     isOpen = true;
     root.hidden = false;
+    controls.mount();
+    menuButton=root.querySelector('.fr-menu-toggle');
     openedBodyLock = !document.body.classList.contains('reader-open');
     document.body.classList.add('reader-open');
     titleElement.textContent = book.title || 'Untitled';
@@ -908,7 +907,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     applySettings();
     lastMeasureKey = '';
     reflow(true);
-    closeButton.focus({ preventScroll: true });
+    menuButton.focus({ preventScroll: true });
     const openedBook=book;
     if(document.fonts?.check(`${settings.fontSize}px Newsreader`)) revealBook();
     else document.fonts?.load(`${settings.fontSize}px Newsreader`).then(()=>{if(isOpen&&book===openedBook){reflow(true);revealBook();}}).catch(()=>{});
@@ -931,6 +930,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     clearTimeout(resizeTimer);
     closePanels();
     root.hidden = true;
+    controls.unmount();
     if (openedBodyLock) document.body.classList.remove('reader-open');
     announcement.textContent = '';
     if (notify) {

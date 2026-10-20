@@ -4,6 +4,8 @@ Folio implements the supplied “Xilo Folio Apple redesign”: a sunset backgrou
 
 The framed reader uses locally hosted Newsreader typography, Paper/Sepia/Night swatches, text-size controls, chapter navigation, book search, and a progress slider. It supports a continuous GPU page mesh with smooth shading, finger-tracked curls, momentum-based release, touch swipes, page-edge taps, keyboard navigation, chapter contents, font-size changes, paper/sepia/night themes, and responsive single-page/two-page reading. Reading positions use a word offset so changing the layout keeps the same passage in view. Reduced-motion preferences remove the 3D animation.
 
+One reading-tools button opens Contents, Search Book, Themes & Text, previous/next page, and Close reader. The controls use `Liquid` and `Liquid.Item` from Libraries.dev's `liquid-gooey` in a small React root. The shared SVG surface merges as the pieces move while their labels remain sharp. Escape and outside taps dismiss the controls; collapsed actions are inert. The effect unmounts when the reader closes or the document is hidden, and reduced motion removes the expansion animation.
+
 The six bundled titles contain original illustrative stories, each with three chapters. They are available for guest reading. Guest libraries and progress stay on the device; configured Firebase accounts use private Firestore library/progress records.
 
 Folio's floating navigation, shelves, collection cards, and account controls use the translucent glass treatment in the supplied design. Shared styles in `css/materials.css` combine a frosted fill, directional highlight, fine edge, and soft shadow. Book covers and reading pages retain solid materials.
@@ -16,16 +18,17 @@ Live website: [xilo-folio.web.app](https://xilo-folio.web.app). It runs in Fireb
 
 ## Run
 
-Requires Node.js 20 or newer. The website has no installation or build dependencies.
+Requires Node.js 20 or newer. Install the locked dependencies before running or building.
 
 ```sh
+npm ci
 npm run dev
 # http://127.0.0.1:4173
 npm run check
 npm run build
 ```
 
-The build copies browser assets into `dist/`. The project uses native JavaScript modules; Firebase downloads its official modular SDK only after a valid web configuration is present.
+The build bundles `src/reader-controls.jsx` locally with React and `liquid-gooey`, then copies browser assets into `dist/`. Generated control assets are ignored by Git and rebuilt by `dev`, `check`, and `build`; `npm run build:controls` rebuilds them after component edits. Runtime licenses ship beside the bundle. Firebase downloads its official modular SDK only after a valid web configuration is present.
 
 ## Firebase
 
@@ -40,6 +43,8 @@ Folio uses dedicated `/folioCatalog` and `/folioUsers/{uid}` collections. An aut
 `npm run check` checks source syntax, configuration, and Firebase adapter behavior. `TEST_PLAN.md` describes browser journeys. Adapter checks do not verify deployed Firestore rules or real authentication providers. Live Firebase verification requires the project configuration and authorized access.
 
 With the dev server running and Playwright installed, `npm run check:navigation` exercises animated book returns, restored shelf position and focus, browser Back/Forward, search, interrupted navigation, and reduced motion at phone and desktop widths. It uses isolated guest contexts with Firebase configuration disabled. Set `FOLIO_TEST_URL` to test another server, or `PLAYWRIGHT_MODULE` and `BROWSER_EXECUTABLE` to use an existing Playwright/Chromium installation.
+
+`npm run check:reader` covers the single-button reader, liquid expansion, keyboard access, contents/search/appearance, preserved reading position, reduced motion, and closing/reopening. It uses the same browser configuration variables and isolated guest contexts.
 
 ## Hosting
 
