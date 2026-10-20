@@ -132,7 +132,7 @@ test('account, preview boundary, and mock checkout form one complete reading jou
    const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'reduce'});
    await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
    const page=await context.newPage();await page.goto(base+'#book/quiet');
-   await page.getByRole('button',{name:/^Buy this Book/i}).click();
+   await page.getByRole('button',{name:/^Buy this book/i}).click();
    const modal=page.locator('#membership-dialog');await modal.waitFor({state:'visible'});
    if(await modal.locator('[data-membership-action="buy"]').isVisible())await modal.locator('[data-membership-action="buy"]').click();
    await modal.locator('[data-step="checkout"]').waitFor();
@@ -151,7 +151,7 @@ test('account, preview boundary, and mock checkout form one complete reading jou
    assert.ok(await page.locator('.fr-locked-chapter').count()>0,'other books remain previews');
    await page.goto(base+'#book/quiet');await page.locator('.book-ownership-label').waitFor();
    assert.match(await page.locator('.book-ownership-label').textContent(),/Owned/);
-   assert.equal(await page.getByRole('button',{name:/^Buy this Book/i}).count(),0,'owners cannot accidentally buy the book again');
+   assert.equal(await page.getByRole('button',{name:/^Buy this book/i}).count(),0,'owners cannot accidentally buy the book again');
    await context.close();
   });
   await t.test('expiry and cross-tab changes reapply the preview without erasing a paid reading position',async()=>{

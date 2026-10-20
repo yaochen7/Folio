@@ -14,8 +14,8 @@ function ReadingControls({model}){
  const anchor={position:'absolute',left:width-size,top:height-size};
  const rows=[
   {action:'contents',label:<>Contents <span className="fr-menu-percentage">· {percentage}%</span></>,glyph:<Glyph name="list"/>},
-  {action:'search',label:'Search Book',glyph:<Glyph name="search"/>},
-  {action:'appearance',label:'Themes & Text',glyph:<span className="fr-aa" aria-hidden="true">Aa</span>}
+  {action:'search',label:'Search this book',glyph:<Glyph name="search"/>},
+  {action:'appearance',label:'Themes & text',glyph:<span className="fr-aa" aria-hidden="true">Aa</span>}
  ];
  return <div className="fr-liquid-surface" data-fr-expanded={expanded?'true':'false'} style={{'--fr-control-size':`${size}px`,'--fr-motion-duration':`${motion.duration}ms`,'--fr-motion-ease':motion.ease}}>
   <Liquid blur={6} contrast={18} fill="var(--fr-liquid-fill)" style={{width,height,pointerEvents:'none'}}>
@@ -26,7 +26,7 @@ function ReadingControls({model}){
     </button>
    </Liquid.Item>)}
    {[
-    {action:'close',label:'Close reader',glyph:'log-out',className:'fr-close'},
+    {action:'close',label:'Close reader',glyph:'x',className:'fr-close'},
     {action:'previous',label:'Previous page',glyph:'chevron-left',disabled:previousDisabled},
     {action:'next',label:'Next page',glyph:'chevron-right',disabled:nextDisabled}
    ].map((action,index)=><Liquid.Item key={action.action} effect="morph" className="fr-liquid-item" style={{...anchor,pointerEvents:expanded?'auto':'none'}} x={expanded?-(width-size)*(3-index)/3:0} y={0} transition={motion} delay={expanded?(2-index)*18:index*18}>
@@ -37,7 +37,7 @@ function ReadingControls({model}){
    </div>
    <Liquid.Item effect="morph" className="fr-liquid-item fr-liquid-trigger" style={anchor}>
     <button type="button" className="fr-liquid-round fr-menu-toggle" data-fr-action="menu" aria-label={expanded?'Hide reading controls':'Reading controls'} aria-expanded={expanded} aria-controls="fr-reading-actions">
-     <span className="fr-liquid-menu-symbol"><Glyph name="list"/></span><span className="fr-liquid-dismiss-symbol"><Glyph name="x"/></span>
+     <span className="fr-liquid-menu-symbol"><Glyph name="more"/></span><span className="fr-liquid-dismiss-symbol"><Glyph name="chevron-down"/></span>
     </button>
    </Liquid.Item>
   </Liquid>

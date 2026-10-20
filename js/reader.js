@@ -94,22 +94,24 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       <button class="fr-preview-continue" type="button" data-fr-action="subscribe" hidden>Continue with Folio Plus ${icon('arrow-right')}</button>
       <aside class="fr-panel fr-contents-panel folio-glass" id="fr-contents-panel" aria-labelledby="fr-contents-heading" hidden>
         <div class="fr-panel-heading"><h2 id="fr-contents-heading">Contents</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close contents">${icon('x')}</button></div>
-        <ol class="fr-chapter-list"></ol>
-        <div class="fr-position-controls"><p class="fr-current-chapter"></p><label class="fr-progress-label" for="fr-progress">Reading progress</label><input id="fr-progress" class="fr-progress-range" type="range" min="0" max="1" step="1" value="0" aria-label="Reading progress"></div>
+        <div class="fr-panel-body"><ol class="fr-chapter-list"></ol>
+        <div class="fr-position-controls"><p class="fr-current-chapter"></p><label class="fr-progress-label" for="fr-progress">Reading progress</label><input id="fr-progress" class="fr-progress-range" type="range" min="0" max="1" step="1" value="0" aria-label="Reading progress"></div></div>
       </aside>
       <aside class="fr-panel fr-search-panel folio-glass" id="fr-search-panel" aria-labelledby="fr-search-heading" hidden>
-        <div class="fr-panel-heading"><h2 id="fr-search-heading">Search Book</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close book search">${icon('x')}</button></div>
-        <label class="fr-search-label" for="fr-book-search">Find in this book</label><input class="fr-book-search" id="fr-book-search" type="search" placeholder="A word or phrase" autocomplete="off">
-        <p class="fr-search-status" role="status"></p><ol class="fr-search-results"></ol>
+        <div class="fr-panel-heading"><h2 id="fr-search-heading">Search this book</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close book search">${icon('x')}</button></div>
+        <div class="fr-panel-body"><label class="fr-search-label" for="fr-book-search">Find in this book</label><input class="fr-book-search" id="fr-book-search" type="search" placeholder="A word or phrase" autocomplete="off">
+        <p class="fr-search-status" role="status"></p><ol class="fr-search-results"></ol></div>
       </aside>
       <aside class="fr-panel fr-appearance-panel folio-glass" id="fr-appearance-panel" aria-labelledby="fr-appearance-heading" hidden>
         <div class="fr-appearance-content">
         <div class="fr-panel-heading"><h2 id="fr-appearance-heading">Make yourself comfortable.</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Back to reading tools">${icon('chevron-left')}</button></div>
+        <div class="fr-appearance-settings">
         <div class="fr-font-control"><span>Text size</span><div><button class="fr-size-button" type="button" data-fr-action="smaller" aria-label="Decrease text size">A−</button><output class="fr-font-value"></output><button class="fr-size-button" type="button" data-fr-action="larger" aria-label="Increase text size">A+</button></div></div>
         <fieldset class="fr-themes"><legend>Page colour</legend><div>${THEMES.map(theme => `<button class="fr-theme-option" type="button" data-fr-action="theme" data-fr-theme-option="${theme}" aria-pressed="false"><span aria-hidden="true">A</span>${theme[0].toUpperCase() + theme.slice(1)}</button>`).join('')}</div></fieldset>
         <label class="fr-spread-setting"><span>Two-page view<small class="fr-spread-note">For a little more room.</small></span><input type="checkbox" class="fr-spread-input"></label>
         <label class="fr-spread-setting fr-tap-setting"><span>Tap to turn pages<small class="fr-spread-note">Tap the page edges to go back or forward.</small></span><input type="checkbox" class="fr-tap-input"></label>
         <p class="fr-settings-note">Your reading preferences stay on this device.</p>
+        </div>
         </div>
       </aside>
       <div class="fr-appearance-surface folio-glass" aria-hidden="true" hidden></div>
@@ -427,7 +429,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     if (!force && key === lastMeasureKey) return;
     lastMeasureKey = key;
     abortTurn();
-    reader.classList.toggle('fr-compact', pageHeight < 380);
+    reader.classList.toggle('fr-compact', (fullBleed ? pageHeight - 160 - safeTop - safeBottom : pageHeight) < 380);
     bookElement.classList.toggle('fr-is-spread', spread);
     bookElement.style.width = `${pageWidth * (spread ? 2 : 1)}px`;
     bookElement.style.height = `${pageHeight}px`;
@@ -587,7 +589,12 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       const item = document.createElement('li'), button = document.createElement('button');
       button.type = 'button'; button.dataset.frAction = 'search-result'; button.dataset.frOffset = String(offset);
       const title = document.createElement('strong'); title.textContent = chapter.title;
-      const snippet = document.createElement('span'); snippet.textContent = `${index > 45 ? '…' : ''}${text.slice(Math.max(0, index - 45), index + query.length + 90)}…`;
+      // Cut the excerpt at word boundaries; mark only cuts that leave a sentence unfinished.
+      let start = Math.max(0, index - 45), end = Math.min(text.length, index + query.length + 90);
+      if (start > 0) start = text.lastIndexOf(' ', start) + 1;
+      if (end < text.length) { const space = text.indexOf(' ', end); end = space < 0 ? text.length : space; }
+      const excerpt = text.slice(start, end).trim();
+      const snippet = document.createElement('span'); snippet.textContent = `${start > 0 ? '…' : ''}${excerpt}${end < text.length && !/[.!?…]['"’”)]*$/.test(excerpt) ? '…' : ''}`;
       button.append(title, snippet); item.append(button); searchResults.append(item);
     }
     root.querySelector('.fr-search-status').textContent = `${count} ${count === 1 ? 'passage' : 'passages'} found${count > 40 ? ' · showing the first 40' : ''}`;
@@ -889,9 +896,11 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
         .filter(element => element.tabIndex>=0&&element.getClientRects().length && !element.closest('[hidden],[inert]'));
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (event.shiftKey && (document.activeElement === first || !root.contains(document.activeElement))) {
+      // The book page and anything else outside the list enter the cycle at its ends.
+      const current = focusable.indexOf(document.activeElement);
+      if (event.shiftKey && current <= 0) {
         event.preventDefault(); last?.focus();
-      } else if (!event.shiftKey && (document.activeElement === last || !root.contains(document.activeElement))) {
+      } else if (!event.shiftKey && (current === -1 || current === focusable.length - 1)) {
         event.preventDefault(); first?.focus();
       }
       return;
@@ -1015,7 +1024,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       button.dataset.frAction = previewOnly && index > 0 ? 'locked-chapter' : 'chapter';
       button.dataset.frChapter = String(index);
       const number = document.createElement('span');
-      number.textContent = `Chapter ${index + 1}${previewOnly && index > 0 ? ' · Folio Plus' : ''}`;
+      number.textContent = `Chapter ${['One','Two','Three'][index] || index + 1}${previewOnly && index > 0 ? ' · Folio Plus' : ''}`;
       const title = document.createElement('strong');
       title.textContent = chapter.title;
       button.append(number, title);
@@ -1029,7 +1038,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     applySettings();
     lastMeasureKey = '';
     reflow(true);
-    menuButton.focus({ preventScroll: true });
+    bookElement.focus({ preventScroll: true });
     const openedBook=book;
     if(document.fonts?.check(`${settings.fontSize}px Newsreader`)) revealBook();
     else document.fonts?.load(`${settings.fontSize}px Newsreader`).then(()=>{if(isOpen&&book===openedBook){reflow(true);revealBook();}}).catch(()=>{});

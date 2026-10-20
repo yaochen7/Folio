@@ -1,21 +1,19 @@
 /* A single regular glass sheet keeps the account form legible over any book. */
-#account-dialog{--glass-fill:var(--glass-raised-fill);--site-blue:light-dark(#0055b8,#a9d1ff);--site-muted:light-dark(#48484f,#d4d6dd);padding:0;width:min(440px,calc(100% - 32px));max-height:calc(100dvh - 40px);overflow:auto;border-radius:30px;color:var(--site-ink);scrollbar-width:thin}
-#account-dialog::backdrop{background:light-dark(rgb(29 34 46 / .28),rgb(0 0 0 / .52))}
-.account-card{position:relative;padding:40px 36px 29px;text-align:center;letter-spacing:-.02em}
-.account-close{position:absolute;right:13px;top:12px;display:flex;align-items:center;justify-content:center;width:35px;height:35px;border:0;border-radius:50%;background:light-dark(rgb(0 0 0 / .045),rgb(255 255 255 / .08));color:var(--site-muted);transition:background-color .18s var(--glass-ease),transform .18s var(--glass-ease)}
-.account-close:hover{background:light-dark(rgb(0 0 0 / .08),rgb(255 255 255 / .14))}
+#account-dialog{--glass-fill:var(--glass-raised-fill);padding:0;width:min(440px,calc(100% - 32px));max-height:calc(100dvh - 32px - env(safe-area-inset-top,0px) - env(safe-area-inset-bottom,0px));overflow:hidden;border-radius:30px;color:var(--site-ink)}#account-dialog[open]{display:flex;flex-direction:column}
+#account-content{min-height:0;margin:22px 4px 22px 0;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;scrollbar-color:var(--glass-scrollbar)}
+.account-card{position:relative;padding:18px 32px 7px 36px;text-align:center;letter-spacing:-.02em}
+.account-close{position:absolute;z-index:1;-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;border:0;border-radius:50%;color:var(--site-muted);transition:background-color .18s var(--glass-ease),transform .18s var(--glass-ease)}
 .account-close:active{transform:scale(.94)}
 .account-close svg{width:17px;height:17px}
 .account-wordmark{display:block;font-size:29px;letter-spacing:-1.7px;font-weight:650;margin:0 0 21px;color:var(--site-ink)}
 .account-card h2{font-size:31px;line-height:1.12;font-weight:600;letter-spacing:-.05em;margin:0 0 15px}
 .account-intro{font-size:14px;line-height:1.6;color:var(--site-muted);margin:0 0 27px}
 .account-card form{text-align:left}
-.account-card .field-label{display:block;font-size:12px;line-height:1.4;color:var(--site-muted);margin:15px 0 7px}
-.account-card input{display:block;width:100%;border:1px solid var(--site-line);border-radius:13px;background:light-dark(rgb(255 255 255 / .72),rgb(17 18 21 / .65));color:var(--site-ink);font-size:16px;line-height:1.4;padding:13px 14px;min-height:49px}
-.account-card .pill{background:#0071e3;color:#fff;border:0;border-radius:999px;padding:13px 22px;display:inline-flex;align-items:center;justify-content:center;gap:8px;font-size:14px;line-height:1.3;min-height:47px}
+.account-card .field-label{display:block;font-size:12px;font-weight:500;line-height:1.4;color:#fff;margin:15px 0 7px}
+.account-card input{display:block;width:100%;border:1px solid var(--site-line);border-radius:13px;color:var(--site-ink);font-size:16px;line-height:1.4;padding:13px 14px;min-height:49px}
+.account-card .pill{color:#fff;border:0;border-radius:999px;padding:13px 28px;display:inline-flex;align-items:center;justify-content:center;gap:8px;font-size:14px;line-height:1.3;min-height:48px}
 .account-card .pill,.google-button{transition:background-color .18s var(--glass-ease),transform .18s var(--glass-ease)}
 .account-card .pill:active,.google-button:active{transform:scale(.98)}
-.account-card .pill:hover{background:#0077ed}
 .account-card .pill svg{height:16px;width:16px}
 .full-width{width:100%}.account-card form .pill{margin-top:24px}
 .auth-divider{display:flex;align-items:center;gap:15px;margin:22px 0;color:var(--site-muted);font-size:11px;line-height:1}
@@ -27,17 +25,17 @@
 .account-switch button,.forgot-password,.guest-link{font-size:12px;line-height:1.5;background:none;border:0;color:var(--site-blue);padding:4px 0}
 .account-switch button{margin-left:3px}
 .forgot-password{display:block;margin:9px auto 0}
-.guest-link{display:block;margin:23px auto 0;color:var(--site-muted);font-size:11px}
+.guest-link{display:block;margin:23px auto 0;color:var(--site-muted);font-size:12px}
 .account-availability,.auth-message{padding:12px 15px;font-size:12px;line-height:1.6;text-align:left;background:var(--site-panel);color:var(--site-muted);border-radius:10px;margin:0 0 20px}
-.auth-message{color:var(--site-ink)}.auth-error{color:light-dark(#a52c1d,#ffad9e);background:light-dark(#fff0ec,#3a2421)}
+.auth-message{color:var(--site-ink)}
 .account-mark{display:flex;align-items:center;justify-content:center;width:60px;height:60px;margin:10px auto 23px;border-radius:50%;background:var(--site-panel);color:var(--site-muted)}
 .account-mark svg{height:28px;width:28px;stroke-width:1.3}
-.account-card .eyebrow{font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--site-muted);margin:0 0 10px}
+.account-card .eyebrow{margin:0 0 10px}
 .account-email{font-size:14px;line-height:1.5;color:var(--site-muted);margin:0 0 26px;overflow-wrap:anywhere}
 .account-sync{display:flex;align-items:center;gap:12px;text-align:left;padding:15px 17px;background:var(--site-panel);border-radius:12px;margin-bottom:26px;font-size:12px;line-height:1.6;color:var(--site-muted)}
 .account-sync svg{width:22px;height:22px}
 .account-card .text-action{background:none;border:0;color:var(--site-blue);padding:9px 0;min-height:39px;font-size:12px;display:inline-flex;align-items:center;justify-content:center;gap:7px}
 .account-card .account-signout{margin:18px auto 0;color:var(--site-muted)}
 .account-signout svg{height:14px;width:14px}
-.toast{position:fixed;z-index:150;bottom:max(22px,env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:max-content;max-width:calc(100% - 32px);background:light-dark(#26262b,#f4f4f7);color:light-dark(#fff,#202124);border-radius:999px;padding:12px 22px;box-shadow:0 6px 30px #0002;font-size:13px;line-height:1.5;text-align:center}
+.toast{position:fixed;z-index:150;inset:auto auto max(22px,env(safe-area-inset-bottom)) 50%;margin:0;transform:translateX(-50%);width:max-content;max-width:calc(100% - 32px);border-radius:999px;padding:12px 22px;font-size:13px;line-height:1.5;text-align:center}
 .noscript-message{max-width:500px;margin:80px auto;padding:0 20px;text-align:center}

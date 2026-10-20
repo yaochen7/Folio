@@ -126,7 +126,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    assert.equal(await page.locator('.fr-controls-host svg[data-gooey-svg]').count(),1);
    await context.close();
   });
-  await t.test('Themes & Text shares a surface with its pill and reverses without jumping',async()=>{
+  await t.test('Themes & text shares a surface with its pill and reverses without jumping',async()=>{
    const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'no-preference'});
    await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
    await context.addInitScript(()=>localStorage.setItem('folio.demo-membership.v1.guest',JSON.stringify({demo:true,planId:'monthly',startedAt:Date.now(),expiresAt:Date.now()+86400000,renew:true,receiptId:'FOLIO-DEMO-reader-fixture'})));

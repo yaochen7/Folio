@@ -232,7 +232,7 @@ test('published links convey one complete book across accounts and guest devices
    await page.locator('#share-dialog').waitFor({state:'visible'});await capture(page,'share-link-390');
    const {page:guest}=await contextFor(null);await guest.goto(cleanShare);await guest.locator('.book-ownership-label').waitFor();
    await guest.locator('#folio-toast').waitFor({state:'hidden'});await guest.evaluate(()=>{document.activeElement?.blur();scrollTo(0,document.querySelector('.detail-copy').getBoundingClientRect().top+scrollY-98)});await capture(guest,'guest-owned-390');
-   const {page:buyer}=await contextFor(null);await buyer.goto(base+'#book/quiet');await buyer.getByRole('button',{name:/^Buy this Book/i}).click();
+   const {page:buyer}=await contextFor(null);await buyer.goto(base+'#book/quiet');await buyer.getByRole('button',{name:/^Buy this book/i}).click();
    await buyer.locator('#membership-dialog [data-step="checkout"]').waitFor();await buyer.evaluate(()=>document.activeElement?.blur());await capture(buyer,'purchase-checkout-390');
   }
  }finally{await Promise.all(contexts.map(context=>context.close()));await browser.close();}
