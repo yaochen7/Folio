@@ -5,7 +5,7 @@ import { createPageCurlRenderer } from './page-curl-renderer.js';
 import { createReadingControls } from './reader-controls.js';
 
 const STORAGE_KEY = 'folio.reader.settings.v1';
-const DEFAULT_SETTINGS = { fontSize: 19, theme: 'sepia', spread: true };
+const DEFAULT_SETTINGS = { fontSize: 19, theme: 'sepia', spread: true, tapToTurn: false };
 const THEMES = ['paper', 'sepia', 'night'];
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const wordsOf = value => String(value || '').trim().split(/\s+/u).filter(Boolean);
@@ -16,7 +16,8 @@ function readSettings() {
     return {
       fontSize: clamp(Number(saved.fontSize) || 19, 14, 26),
       theme: THEMES.includes(saved.theme) ? saved.theme : 'sepia',
-      spread: saved.spread !== false
+      spread: saved.spread !== false,
+      tapToTurn: saved.tapToTurn === true
     };
   } catch { return { ...DEFAULT_SETTINGS }; }
 }
@@ -103,6 +104,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
         <div class="fr-font-control"><span>Text size</span><div><button class="fr-size-button" type="button" data-fr-action="smaller" aria-label="Decrease text size">A−</button><output class="fr-font-value"></output><button class="fr-size-button" type="button" data-fr-action="larger" aria-label="Increase text size">A+</button></div></div>
         <fieldset class="fr-themes"><legend>Page colour</legend><div>${THEMES.map(theme => `<button class="fr-theme-option" type="button" data-fr-action="theme" data-fr-theme-option="${theme}" aria-pressed="false"><span aria-hidden="true">A</span>${theme[0].toUpperCase() + theme.slice(1)}</button>`).join('')}</div></fieldset>
         <label class="fr-spread-setting"><span>Two-page view<small class="fr-spread-note">For a little more room.</small></span><input type="checkbox" class="fr-spread-input"></label>
+        <label class="fr-spread-setting fr-tap-setting"><span>Tap to turn pages<small class="fr-spread-note">Tap the page edges to go back or forward.</small></span><input type="checkbox" class="fr-tap-input"></label>
         <p class="fr-settings-note">Your reading preferences stay on this device.</p>
       </aside>
       <div class="fr-announcement" aria-live="polite" aria-atomic="true"></div>
@@ -127,6 +129,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   const searchResults = root.querySelector('.fr-search-results');
   const chapterList = root.querySelector('.fr-chapter-list');
   const spreadInput = root.querySelector('.fr-spread-input');
+  const tapInput = root.querySelector('.fr-tap-input');
   const fontValue = root.querySelector('.fr-font-value');
   const measurePage = document.createElement('article');
   measurePage.className = 'fr-page fr-measure';
@@ -148,6 +151,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     root.querySelectorAll('[data-fr-action="larger"]').forEach(button=>button.disabled = settings.fontSize >= 26);
     root.querySelectorAll('[data-fr-theme-option]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.frThemeOption === settings.theme)));
     spreadInput.checked = settings.spread && !spreadInput.disabled;
+    tapInput.checked = settings.tapToTurn;
   }
 
   function makeBlock(block) {
@@ -392,17 +396,19 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     const width = stage.clientWidth - parseFloat(stageStyle.paddingLeft) - parseFloat(stageStyle.paddingRight);
     const height = stage.clientHeight - parseFloat(stageStyle.paddingTop) - parseFloat(stageStyle.paddingBottom);
     if (!width || !height) return;
-    const spreadAvailable = reader.clientWidth >= 900;
+    const readerStyle = getComputedStyle(reader);
+    const fullBleed = readerStyle.getPropertyValue('--fr-full-bleed').trim() === '1';
+    const spreadAvailable = !fullBleed && reader.clientWidth >= 900;
     spreadInput.disabled = !spreadAvailable;
     root.querySelector('.fr-spread-note').textContent = spreadAvailable ? 'For a little more room.' : 'Available in a wider window.';
     spread = settings.spread && spreadAvailable;
     spreadInput.checked = spread;
-    const safeTop = parseFloat(getComputedStyle(reader).getPropertyValue('--fr-safe-top')) || 0;
-    const safeBottom = parseFloat(getComputedStyle(reader).getPropertyValue('--fr-safe-bottom')) || 0;
+    const safe = side => parseFloat(readerStyle.getPropertyValue(`--fr-safe-${side}`)) || 0;
+    const safeTop = safe('top'), safeBottom = safe('bottom');
     const availableHeight = Math.max(120, Math.min(height, spread ? 780 : 860));
-    pageWidth = Math.floor(Math.min(width / (spread ? 2 : 1), spread ? 580 : 640, availableHeight * (spread ? .7 : .74)));
-    pageHeight = Math.floor(Math.min(availableHeight, pageWidth * (spread ? 1.6 : 1.8)));
-    const key = `${pageWidth}:${pageHeight}:${spread}:${settings.fontSize}:${safeTop}:${safeBottom}`;
+    pageWidth = Math.floor(fullBleed ? width : Math.min(width / (spread ? 2 : 1), spread ? 580 : 640, availableHeight * (spread ? .7 : .74)));
+    pageHeight = Math.floor(fullBleed ? height : Math.min(availableHeight, pageWidth * (spread ? 1.6 : 1.8)));
+    const key = `${pageWidth}:${pageHeight}:${spread}:${fullBleed}:${settings.fontSize}:${safeTop}:${safeBottom}:${safe('left')}:${safe('right')}`;
     if (!force && key === lastMeasureKey) return;
     lastMeasureKey = key;
     abortTurn();
@@ -758,7 +764,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
         else if (complete) requestTurn(ended.direction);
       }
       else releaseTurn(complete, releaseVelocity);
-    } else if (!cancelled && ended.edgeDirection && !ended.hadSelection && !window.getSelection()?.toString()) {
+    } else if (!cancelled && settings.tapToTurn && ended.edgeDirection && !ended.hadSelection && !window.getSelection()?.toString()) {
       const movement = Math.hypot(event.clientX - ended.startX, event.clientY - ended.startY);
       if (movement < 9) requestTurn(ended.edgeDirection);
     } else if (!cancelled && !ended.hadSelection && !window.getSelection()?.toString() && Math.hypot(event.clientX - ended.startX, event.clientY - ended.startY) < 9) setChrome(!chromeVisible);
@@ -803,6 +809,11 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     settings.spread = spreadInput.checked;
     saveSettings();
     reflow(true);
+  }
+
+  function onTapToTurnChange() {
+    settings.tapToTurn = tapInput.checked;
+    saveSettings();
   }
 
   function onRangeInput() {
@@ -858,6 +869,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('focusin', onFocusIn);
   spreadInput.addEventListener('change', onSpreadChange);
+  tapInput.addEventListener('change', onTapToTurnChange);
   bookSearch.addEventListener('input', searchBook);
   range.addEventListener('input', onRangeInput);
   range.addEventListener('change', onRangeChange);
@@ -960,6 +972,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     document.removeEventListener('keydown', onKeyDown);
     document.removeEventListener('focusin', onFocusIn);
     spreadInput.removeEventListener('change', onSpreadChange);
+    tapInput.removeEventListener('change', onTapToTurnChange);
     bookSearch.removeEventListener('input', searchBook);
     range.removeEventListener('input', onRangeInput);
     range.removeEventListener('change', onRangeChange);

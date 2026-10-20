@@ -194,3 +194,21 @@ body.reader-open{overflow:hidden;overscroll-behavior:none}
 @media(forced-colors:active){#reader-root .fr-liquid-surface svg[data-gooey-svg],#reader-root .fr-liquid-surface svg[data-gooey-overlay]{display:none}#reader-root .fr-liquid-surface .fr-liquid-round,#reader-root .fr-liquid-surface .fr-liquid-row{background:ButtonFace;color:ButtonText;border:1px solid ButtonText}}
 @media(forced-colors:active){#reader-root .fr-reader::before{background:Canvas;backdrop-filter:none;-webkit-backdrop-filter:none}}
 @media(forced-colors:active){#reader-root .fr-liquid-surface button::before{display:none}}
+/* Mobile reading uses the whole viewport; only text and controls respect the
+   device's safe areas. Keep the framed spread for wider reading windows. */
+@media(max-width:899px),(pointer:coarse) and (max-height:600px){
+ #reader-root .fr-reader{--fr-full-bleed:1;background:var(--fr-paper)}
+ #reader-root .fr-reader::before{display:none}
+ #reader-root .fr-stage{inset:0;padding:0}
+ #reader-root .fr-book{border-radius:0;box-shadow:none}
+ #reader-root .fr-page{padding:calc(76px + var(--fr-safe-top)) calc(24px + var(--fr-safe-right)) calc(84px + var(--fr-safe-bottom)) calc(24px + var(--fr-safe-left));border-radius:0}
+ #reader-root .fr-folio{display:none}
+ #reader-root .fr-book-title,#reader-root .fr-book-author,#reader-root .fr-page-count{color:var(--fr-muted)}
+}
+#reader-root .fr-tap-setting{margin-top:18px}
+#reader-root .fr-spread-setting input{appearance:none;-webkit-appearance:none;position:relative;flex:none;width:44px;height:26px;border:1px solid rgb(255 255 255 / .18);border-radius:999px;background:rgb(255 255 255 / .16);transition:background .18s ease;cursor:pointer}
+#reader-root .fr-spread-setting input::before{content:"";position:absolute;top:2px;left:2px;width:20px;height:20px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgb(0 0 0 / .18);transition:transform .18s ease}
+#reader-root .fr-spread-setting input:checked{background:var(--fr-accent);border-color:transparent}
+#reader-root .fr-spread-setting input:checked::before{transform:translateX(18px)}
+#reader-root .fr-spread-setting input:disabled{opacity:.35;cursor:default}
+@media(forced-colors:active){#reader-root .fr-spread-setting input{appearance:auto;-webkit-appearance:auto;width:20px;height:20px;border:0;background:Canvas;accent-color:Highlight}#reader-root .fr-spread-setting input::before{display:none}}

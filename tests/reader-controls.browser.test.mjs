@@ -20,6 +20,18 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    await page.goto(base+'#read/quiet');
    await page.locator('.fr-book[aria-busy="false"]').waitFor();
    await page.waitForTimeout(1100);
+   assert.equal(await page.locator('.fr-tap-input').isChecked(),false);
+   const bookBounds=await page.locator('.fr-book').boundingBox();
+   if(width<900){
+    assert.deepEqual(bookBounds,{x:0,y:0,width,height:844},'mobile pages fill the viewport');
+    assert.equal(await page.locator('.fr-book').evaluate(e=>getComputedStyle(e).boxShadow),'none');
+   }
+   const initialOffset=await page.locator('.fr-progress-range').inputValue();
+   for(const x of [bookBounds.x+bookBounds.width-8,bookBounds.x+8]){
+    if(width<900)await page.touchscreen.tap(x,bookBounds.y+bookBounds.height*.45);
+    else await page.mouse.click(x,bookBounds.y+bookBounds.height*.45);
+   }
+   assert.equal(await page.locator('.fr-progress-range').inputValue(),initialOffset,'edge taps do not turn pages by default');
    assert.equal(await page.evaluate(()=>[...document.querySelectorAll('#reader-root button')].filter(e=>e.getClientRects().length&&e.tabIndex>=0&&!e.closest('[hidden],[inert]')).length),1);
    assert.equal(await page.locator('.fr-controls-host svg[data-gooey-svg]').count(),1);
    assert.equal(await page.locator('.fr-liquid-actions').evaluate(e=>getComputedStyle(e).opacity),'0');
@@ -72,6 +84,36 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    await page.locator('.fr-book[aria-busy="false"]').waitFor();
    assert.equal(await page.locator('.fr-menu-toggle').count(),1);
    assert.deepEqual(errors,[]);
+   await context.close();
+  });
+  await t.test('tap turning is an opt-in context setting that persists',async()=>{
+   const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'reduce'});
+   await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
+   const page=await context.newPage();
+   await page.goto(base+'#read/quiet');
+   await page.locator('.fr-book[aria-busy="false"]').waitFor();
+   await openMenu(page);
+   await page.locator('.fr-appearance-toggle').click();
+   await page.getByRole('checkbox',{name:/Tap to turn pages/}).check();
+   await page.keyboard.press('Escape');
+   const before=await page.locator('.fr-progress-range').inputValue();
+   await page.touchscreen.tap(382,400);
+   await page.waitForFunction(()=>Number(document.querySelector('.fr-progress-range').value)>0);
+   assert.notEqual(await page.locator('.fr-progress-range').inputValue(),before);
+   await page.reload();
+   await page.locator('.fr-book[aria-busy="false"]').waitFor();
+   assert.equal(await page.locator('.fr-tap-input').isChecked(),true,'explicit preference survives reload');
+   await openMenu(page);
+   await page.locator('.fr-appearance-toggle').click();
+   await page.getByRole('checkbox',{name:/Tap to turn pages/}).uncheck();
+   await page.keyboard.press('Escape');
+   const offset=await page.locator('.fr-progress-range').inputValue();
+   await page.touchscreen.tap(382,400);
+   await page.touchscreen.tap(8,400);
+   assert.equal(await page.locator('.fr-progress-range').inputValue(),offset,'switching it off immediately protects both edges');
+   await page.reload();
+   await page.locator('.fr-book[aria-busy="false"]').waitFor();
+   assert.equal(await page.locator('.fr-tap-input').isChecked(),false);
    await context.close();
   });
   await t.test('spacing survives short screens and safe areas',async()=>{
