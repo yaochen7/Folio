@@ -86,6 +86,40 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    assert.deepEqual(errors,[]);
    await context.close();
   });
+  await t.test('closing controls stay visible while flowing back and can reverse',async()=>{
+   const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'no-preference'});
+   await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
+   const page=await context.newPage();
+   await page.goto(base+'#read/quiet');
+   await page.locator('.fr-book[aria-busy="false"]').waitFor();
+   await page.waitForTimeout(1100);
+   await openMenu(page);
+   const result=await page.evaluate(async()=>{
+    const group=document.querySelector('.fr-liquid-actions'),item=document.querySelector('.fr-contents-toggle').closest('.fr-liquid-item'),menu=document.querySelector('.fr-menu-toggle');
+    const y=()=>Number(item.style.transform.match(/, ([-\d.]+)px/)?.[1]||0),start=Math.abs(y()),frames=[];
+    menu.click();
+    const inert=group.inert&&[...group.querySelectorAll('button')].every(e=>e.tabIndex<0);
+    const until=performance.now()+650;
+    await new Promise(resolve=>{const record=()=>{frames.push({remaining:Math.abs(y())/start,opacity:Number(getComputedStyle(group).opacity)});if(performance.now()<until)requestAnimationFrame(record);else resolve()};requestAnimationFrame(record)});
+    menu.click();
+    await new Promise(resolve=>setTimeout(resolve,160));
+    menu.click();
+    await new Promise(resolve=>setTimeout(resolve,130));
+    menu.click();
+    return{inert,frames};
+   });
+   assert.equal(result.inert,true,'closing tools stop receiving input immediately');
+   const returning=result.frames.filter(frame=>frame.remaining>.15&&frame.remaining<.65);
+   assert.ok(returning.length>0,'the return motion includes intermediate positions');
+   assert.ok(returning.every(frame=>frame.opacity>.8),'surfaces remain visible during the return');
+   await page.waitForFunction(()=>{
+    const e=document.querySelector('.fr-contents-toggle').closest('.fr-liquid-item'),y=Number(e.style.transform.match(/, ([-\d.]+)px/)?.[1]||0);
+    return Math.abs(y+parseFloat(e.style.top))<.25;
+   });
+   assert.equal(await page.locator('.fr-menu-toggle').getAttribute('aria-expanded'),'true','interrupted motion reaches the latest state');
+   assert.equal(await page.locator('.fr-controls-host svg[data-gooey-svg]').count(),1);
+   await context.close();
+  });
   await t.test('tap turning is an opt-in context setting that persists',async()=>{
    const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'reduce'});
    await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
@@ -137,7 +171,8 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
     }));
     assert.ok(await page.evaluate(()=>{
      const bounds=[...document.querySelectorAll('.fr-controls-host button')].map(e=>e.getBoundingClientRect());
-     return bounds.every(r=>r.left>=47+12&&r.right<=innerWidth-47-12&&r.top>=16&&r.bottom<=innerHeight-21-12&&r.width>=44&&r.height>=44)&&bounds.every((r,i)=>bounds.every((s,j)=>i===j||Math.max(s.left-r.right,r.left-s.right,s.top-r.bottom,r.top-s.bottom)>=8));
+     // Fractional motion can report a 44px target as 43.99999px in DOMRect.
+     return bounds.every(r=>r.left>=47+12&&r.right<=innerWidth-47-12&&r.top>=16&&r.bottom<=innerHeight-21-12&&r.width>=43.99&&r.height>=43.99)&&bounds.every((r,i)=>bounds.every((s,j)=>i===j||Math.max(s.left-r.right,r.left-s.right,s.top-r.bottom,r.top-s.bottom)>=8));
     }),'controls retain margins and 44px targets in landscape');
    }
    await context.close();

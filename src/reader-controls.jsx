@@ -4,22 +4,24 @@ import {flushSync} from 'react-dom';
 import {Liquid} from 'liquid-gooey';
 import {icon} from '../js/icons.js';
 
-const rowMotion={duration:460,ease:'cubic-bezier(.22,1,.36,1)'};
+const openMotion={duration:540,ease:'cubic-bezier(.22,1.12,.36,1)'};
+const closeMotion={duration:420,ease:'cubic-bezier(.32,0,.28,1)'};
 const Glyph=({name})=><span className="fr-liquid-glyph" aria-hidden="true" dangerouslySetInnerHTML={{__html:icon(name)}}/>;
 
 function ReadingControls({model}){
  const {expanded,width,height,step,size,percentage,previousDisabled,nextDisabled}=model;
+ const motion=expanded?openMotion:closeMotion;
  const anchor={position:'absolute',left:width-size,top:height-size};
  const rows=[
   {action:'contents',label:<>Contents <span className="fr-menu-percentage">· {percentage}%</span></>,glyph:<Glyph name="list"/>},
   {action:'search',label:'Search Book',glyph:<Glyph name="search"/>},
   {action:'appearance',label:'Themes & Text',glyph:<span className="fr-aa" aria-hidden="true">Aa</span>}
  ];
- return <div className="fr-liquid-surface" data-fr-expanded={expanded?'true':'false'} style={{'--fr-control-size':`${size}px`}}>
-  <Liquid blur={4} contrast={18} fill="var(--fr-liquid-fill)" style={{width,height,pointerEvents:'none'}}>
+ return <div className="fr-liquid-surface" data-fr-expanded={expanded?'true':'false'} style={{'--fr-control-size':`${size}px`,'--fr-motion-duration':`${motion.duration}ms`,'--fr-motion-ease':motion.ease}}>
+  <Liquid blur={6} contrast={18} fill="var(--fr-liquid-fill)" style={{width,height,pointerEvents:'none'}}>
    <div id="fr-reading-actions" className="fr-liquid-actions" role="group" aria-label="Reading tools" aria-hidden={!expanded} inert={!expanded} style={{position:'absolute',inset:0,pointerEvents:'none'}}>
-   {rows.map((row,index)=><Liquid.Item key={row.action} effect="morph" className="fr-liquid-item" style={{...anchor,pointerEvents:expanded?'auto':'none'}} x={expanded?size-width:0} y={expanded?-(3-index)*step:0} transition={rowMotion} delay={expanded?index*30:(2-index)*20}>
-    <button type="button" className={`fr-liquid-row fr-${row.action}-toggle`} data-fr-action={row.action} aria-controls={`fr-${row.action}-panel`} aria-expanded="false" aria-hidden={!expanded} tabIndex={expanded?0:-1} style={{width:expanded?width:size,'--fr-liquid-delay':`${expanded?index*30:(2-index)*20}ms`}}>
+   {rows.map((row,index)=><Liquid.Item key={row.action} effect="morph" className="fr-liquid-item" style={{...anchor,pointerEvents:expanded?'auto':'none'}} x={expanded?size-width:0} y={expanded?-(3-index)*step:0} transition={motion} delay={expanded?(2-index)*26:index*18}>
+    <button type="button" className={`fr-liquid-row fr-${row.action}-toggle`} data-fr-action={row.action} aria-controls={`fr-${row.action}-panel`} aria-expanded="false" aria-hidden={!expanded} tabIndex={expanded?0:-1} style={{width:expanded?width:size,'--fr-liquid-delay':`${expanded?(2-index)*26:index*18}ms`}}>
      <span className="fr-liquid-label">{row.label}</span>{row.glyph}
     </button>
    </Liquid.Item>)}
@@ -27,8 +29,8 @@ function ReadingControls({model}){
     {action:'close',label:'Close reader',glyph:'log-out',className:'fr-close'},
     {action:'previous',label:'Previous page',glyph:'chevron-left',disabled:previousDisabled},
     {action:'next',label:'Next page',glyph:'chevron-right',disabled:nextDisabled}
-   ].map((action,index)=><Liquid.Item key={action.action} effect="morph" className="fr-liquid-item" style={{...anchor,pointerEvents:expanded?'auto':'none'}} x={expanded?-(width-size)*(3-index)/3:0} y={0} transition="bouncy" delay={expanded?index*25:(2-index)*20}>
-    <button type="button" className={`fr-liquid-round ${action.className||'fr-page-nav'}`} data-fr-action={action.action} aria-label={action.label} aria-hidden={!expanded} tabIndex={expanded?0:-1} disabled={action.disabled}>
+   ].map((action,index)=><Liquid.Item key={action.action} effect="morph" className="fr-liquid-item" style={{...anchor,pointerEvents:expanded?'auto':'none'}} x={expanded?-(width-size)*(3-index)/3:0} y={0} transition={motion} delay={expanded?(2-index)*18:index*18}>
+    <button type="button" className={`fr-liquid-round ${action.className||'fr-page-nav'}`} data-fr-action={action.action} aria-label={action.label} aria-hidden={!expanded} tabIndex={expanded?0:-1} disabled={action.disabled} style={{'--fr-liquid-delay':`${expanded?(2-index)*18:index*18}ms`}}>
      <Glyph name={action.glyph}/>
     </button>
    </Liquid.Item>)}
