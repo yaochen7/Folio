@@ -477,5 +477,5 @@ export function escapeHtml(value) {
 
 export function renderCover(book) {
   // Cover line breaks are trusted, authored markup from this fixed catalog.
-  return `<div class="book-cover ${escapeHtml(book.kind)}" aria-hidden="true"><span class="cover-kicker">${escapeHtml(book.kicker)}</span><span class="cover-title">${book.cover}</span><div class="art">${book.kind === "atlas" ? "<i></i><i></i><i></i><i></i><i></i><i></i>" : ""}</div><span class="cover-author">${escapeHtml(book.author.toUpperCase())}</span></div>`;
+  return `<div class="book-cover ${escapeHtml(book.kind)}" aria-hidden="true"><span class="cover-kicker">${escapeHtml(book.kicker)}</span><span class="cover-title">${book.cover}</span><div class="art">${book.kind === "atlas" ? "<i></i><i></i><i></i><i></i><i></i><i></i>" : ""}</div><span class="cover-author">${escapeHtml(book.author)}</span></div>`;
 }

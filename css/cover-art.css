@@ -1,41 +1,45 @@
 /* Original Folio cover illustrations. */
-#folio-app .cover-button{border:0;background:none;padding:0;text-align:left;color:inherit;display:block;min-width:0}
-#folio-app .book-cover{width:100%;aspect-ratio:2/3;position:relative;overflow:hidden;border-radius:2px 5px 5px 2px;box-shadow:3px 13px 22px #0002,1px 2px 4px #0002;isolation:isolate;container-type:inline-size;transition:transform .25s ease;letter-spacing:0}
-#folio-app .book-cover:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,#0003 0,transparent 2%,#ffffff18 3%,transparent 5%,transparent 98%,#0002 100%);z-index:5;pointer-events:none;box-shadow:inset -1px 0 #ffffff40}
-#folio-app .book-cover .cover-kicker{position:absolute;top:7%;left:10%;right:9%;font-size:11px;font-size:5.8cqw;letter-spacing:.14em;text-transform:uppercase;z-index:3;font-weight:500}
-#folio-app .book-cover .cover-title{position:absolute;left:10%;right:8%;top:16%;font-family:Georgia,"Times New Roman",serif;font-size:32px;font-size:16cqw;line-height:1.02;letter-spacing:-.055em;z-index:3;font-weight:400}
-#folio-app .book-cover .cover-author{position:absolute;bottom:7%;left:10%;right:7%;font-size:11px;font-size:6.5cqw;letter-spacing:.07em;z-index:3;font-weight:500}
-#folio-app .shape{background:#df6949;color:#301f1c}
-#folio-app .shape .art{position:absolute;inset:43% -10% -15% 9%;border-radius:46% 46% 0 0;background:#f4c7a0;transform:rotate(-20deg)}
-#folio-app .shape .art:before{content:"";position:absolute;inset:18% 29% -10% 29%;background:#a63e2a;border-radius:50% 50% 0 0}
-#folio-app .shape .art:after{content:"";position:absolute;width:35%;aspect-ratio:1;border-radius:50%;background:#f9e0b5;right:7%;top:-17%;z-index:-1}
-#folio-app .atlas{background:#efe5cd;color:#242830}
-#folio-app .atlas .cover-title{top:16%;font-family:inherit;font-weight:600;font-size:15cqw;letter-spacing:-.06em}
-#folio-app .atlas .art{position:absolute;left:12%;right:12%;top:52%;bottom:21%;display:grid;grid-template-columns:repeat(3,1fr);gap:12%}
-#folio-app .atlas .art i{background:#e75637;border-radius:50%}
-#folio-app .atlas .art i:nth-child(2){background:#314d9a;border-radius:0 70% 0 0;transform:rotate(30deg)}
-#folio-app .atlas .art i:nth-child(3){background:#c4a33d;border-radius:50% 50% 0 0}
-#folio-app .atlas .art i:nth-child(4){background:#2c503f;border-radius:0;transform:rotate(18deg)}
-#folio-app .atlas .art i:nth-child(5){background:#d09b87;border-radius:50% 50% 0 0}
-#folio-app .atlas .art i:nth-child(6){background:#263646;border-radius:10% 60% 20% 50%}
-#folio-app .blue-hour{background:#2045c7;color:#f1eee5}
-#folio-app .blue-hour .cover-title{top:12%;font-size:22cqw;line-height:.92;letter-spacing:-.07em}
-#folio-app .blue-hour .cover-kicker{top:49%;letter-spacing:.2em;font-size:5cqw}
-#folio-app .blue-hour .art{position:absolute;width:65%;aspect-ratio:1;border-radius:50%;background:#e7edee;bottom:9%;left:18%}
-#folio-app .blue-hour .art:after{content:"";position:absolute;inset:41% -35% -20% -35%;background:#0b2269;clip-path:polygon(0 48%,12% 48%,12% 20%,27% 20%,27% 0,40% 0,40% 33%,52% 33%,52% 14%,62% 14%,62% 45%,80% 45%,80% 25%,91% 25%,91% 51%,100% 51%,100% 100%,0 100%)}
-#folio-app .wild{background:#234d3b;color:#f1e9cb}
-#folio-app .wild .cover-title{font-size:22cqw;line-height:.95;top:11%}
-#folio-app .wild .art{position:absolute;width:51%;height:42%;left:27%;top:37%;border-radius:0 100% 0 100%;background:repeating-linear-gradient(60deg,transparent 0 11%,#244c3c55 11.5% 12%,transparent 12.5% 20%),#e6dca8;transform:rotate(23deg)}
-#folio-app .wild .art:after{content:"";position:absolute;width:2px;left:49%;height:130%;background:#d47e5d;transform:rotate(-27deg);top:2%}
-#folio-app .slowly{background:#e6b7a3;color:#2d3653}
-#folio-app .slowly .cover-title{font-size:17cqw;top:12%}
-#folio-app .slowly .art{position:absolute;inset:46% -30% -26% -20%;background:#eed7b4;border-radius:50% 40% 0 0;transform:rotate(-14deg)}
-#folio-app .slowly .art:before{content:"";position:absolute;inset:32% -5% -10% 0;background:#c9906d;border-radius:60% 40% 0 0;transform:rotate(21deg)}
-#folio-app .slowly .art:after{content:"";position:absolute;left:39%;top:-5%;width:28%;height:140%;border:9px solid #294c8d;border-radius:50%;transform:rotate(-24deg)}
-#folio-app .tomorrow{background:#16233b;color:#e8e9e4}
-#folio-app .tomorrow .cover-title{top:14%;font-family:inherit;font-size:15cqw;line-height:1.1;letter-spacing:-.05em;font-weight:500}
-#folio-app .tomorrow .art{position:absolute;width:143%;height:40%;left:-22%;bottom:2%;border-radius:50% 50% 0 0;background:#a8b7bb;box-shadow:0 -2px 0 #d7e1dc,0 -18px 45px #a0c6d444}
-#folio-app .tomorrow .art:before{content:"";position:absolute;width:93%;height:180%;border:2px solid #d88e58;left:5%;top:-110%;border-radius:50%;transform:rotate(-34deg);z-index:-1}
-#folio-app .tomorrow .cover-author{color:#1d2936}
-#folio-app .blue-hour .cover-title{font-size:21cqw;top:10%}
-#folio-app .blue-hour .art{width:58%;left:21%;bottom:8%}
+:is(#folio-app,#reader-root) .cover-button{border:0;background:none;padding:0;text-align:left;color:inherit;display:block;min-width:0}
+:is(#folio-app,#reader-root) .book-cover{width:100%;aspect-ratio:2/3;position:relative;overflow:hidden;border-radius:2px 5px 5px 2px;box-shadow:3px 13px 22px #0002,1px 2px 4px #0002;isolation:isolate;container-type:inline-size;transition:transform .25s ease;letter-spacing:0}
+:is(#folio-app,#reader-root) .book-cover:after{content:"";position:absolute;inset:0;background:linear-gradient(90deg,#0003 0,transparent 2%,#ffffff18 3%,transparent 5%,transparent 98%,#0002 100%);z-index:5;pointer-events:none;box-shadow:inset -1px 0 #ffffff40}
+:is(#folio-app,#reader-root) .book-cover .cover-kicker{position:absolute;top:7%;left:10%;right:9%;font-size:11px;font-size:5.8cqw;letter-spacing:.14em;text-transform:uppercase;z-index:3;font-weight:500}
+:is(#folio-app,#reader-root) .book-cover .cover-title{position:absolute;left:10%;right:8%;top:16%;font-family:Georgia,"Times New Roman",serif;font-size:32px;font-size:16cqw;line-height:1.02;letter-spacing:-.055em;z-index:3;font-weight:400}
+:is(#folio-app,#reader-root) .book-cover .cover-author{position:absolute;bottom:7%;left:10%;right:7%;font-size:11px;font-size:6.5cqw;letter-spacing:.07em;z-index:3;font-weight:500}
+:is(#folio-app,#reader-root) .shape{background:#df6949;color:#301f1c}
+:is(#folio-app,#reader-root) .shape .art{position:absolute;inset:43% -10% -15% 9%;border-radius:46% 46% 0 0;background:#f4c7a0;transform:rotate(-20deg)}
+:is(#folio-app,#reader-root) .shape .art:before{content:"";position:absolute;inset:18% 29% -10% 29%;background:#a63e2a;border-radius:50% 50% 0 0}
+:is(#folio-app,#reader-root) .shape .art:after{content:"";position:absolute;width:35%;aspect-ratio:1;border-radius:50%;background:#f9e0b5;right:7%;top:-17%;z-index:-1}
+:is(#folio-app,#reader-root) .atlas{background:#efe5cd;color:#242830}
+:is(#folio-app,#reader-root) .atlas .cover-title{top:16%;font-family:inherit;font-weight:600;font-size:15cqw;letter-spacing:-.06em}
+:is(#folio-app,#reader-root) .atlas .art{position:absolute;left:12%;right:12%;top:52%;bottom:21%;display:grid;grid-template-columns:repeat(3,1fr);gap:12%}
+:is(#folio-app,#reader-root) .atlas .art i{background:#e75637;border-radius:50%}
+:is(#folio-app,#reader-root) .atlas .art i:nth-child(2){background:#314d9a;border-radius:0 70% 0 0;transform:rotate(30deg)}
+:is(#folio-app,#reader-root) .atlas .art i:nth-child(3){background:#c4a33d;border-radius:50% 50% 0 0}
+:is(#folio-app,#reader-root) .atlas .art i:nth-child(4){background:#2c503f;border-radius:0;transform:rotate(18deg)}
+:is(#folio-app,#reader-root) .atlas .art i:nth-child(5){background:#d09b87;border-radius:50% 50% 0 0}
+:is(#folio-app,#reader-root) .atlas .art i:nth-child(6){background:#263646;border-radius:10% 60% 20% 50%}
+:is(#folio-app,#reader-root) .blue-hour{background:#2045c7;color:#f1eee5}
+:is(#folio-app,#reader-root) .blue-hour .cover-title{top:12%;font-size:22cqw;line-height:.92;letter-spacing:-.07em}
+:is(#folio-app,#reader-root) .blue-hour .cover-kicker{top:49%;letter-spacing:.2em;font-size:5cqw}
+:is(#folio-app,#reader-root) .blue-hour .art{position:absolute;width:65%;aspect-ratio:1;border-radius:50%;background:#e7edee;bottom:9%;left:18%}
+:is(#folio-app,#reader-root) .blue-hour .art:after{content:"";position:absolute;inset:41% -35% -20% -35%;background:#0b2269;clip-path:polygon(0 48%,12% 48%,12% 20%,27% 20%,27% 0,40% 0,40% 33%,52% 33%,52% 14%,62% 14%,62% 45%,80% 45%,80% 25%,91% 25%,91% 51%,100% 51%,100% 100%,0 100%)}
+:is(#folio-app,#reader-root) .wild{background:#234d3b;color:#f1e9cb}
+:is(#folio-app,#reader-root) .wild .cover-title{font-size:22cqw;line-height:.95;top:11%}
+:is(#folio-app,#reader-root) .wild .art{position:absolute;width:51%;height:42%;left:27%;top:37%;border-radius:0 100% 0 100%;background:repeating-linear-gradient(60deg,transparent 0 11%,#244c3c55 11.5% 12%,transparent 12.5% 20%),#e6dca8;transform:rotate(23deg)}
+:is(#folio-app,#reader-root) .wild .art:after{content:"";position:absolute;width:2px;left:49%;height:130%;background:#d47e5d;transform:rotate(-27deg);top:2%}
+:is(#folio-app,#reader-root) .slowly{background:#e6b7a3;color:#2d3653}
+:is(#folio-app,#reader-root) .slowly .cover-title{font-size:17cqw;top:12%}
+:is(#folio-app,#reader-root) .slowly .art{position:absolute;inset:46% -30% -26% -20%;background:#eed7b4;border-radius:50% 40% 0 0;transform:rotate(-14deg)}
+:is(#folio-app,#reader-root) .slowly .art:before{content:"";position:absolute;inset:32% -5% -10% 0;background:#c9906d;border-radius:60% 40% 0 0;transform:rotate(21deg)}
+:is(#folio-app,#reader-root) .slowly .art:after{content:"";position:absolute;left:39%;top:-5%;width:28%;height:140%;border:9px solid #294c8d;border-radius:50%;transform:rotate(-24deg)}
+:is(#folio-app,#reader-root) .tomorrow{background:#16233b;color:#e8e9e4}
+:is(#folio-app,#reader-root) .tomorrow .cover-title{top:14%;font-family:inherit;font-size:15cqw;line-height:1.1;letter-spacing:-.05em;font-weight:500}
+:is(#folio-app,#reader-root) .tomorrow .art{position:absolute;width:143%;height:40%;left:-22%;bottom:2%;border-radius:50% 50% 0 0;background:#a8b7bb;box-shadow:0 -2px 0 #d7e1dc,0 -18px 45px #a0c6d444}
+:is(#folio-app,#reader-root) .tomorrow .art:before{content:"";position:absolute;width:93%;height:180%;border:2px solid #d88e58;left:5%;top:-110%;border-radius:50%;transform:rotate(-34deg);z-index:-1}
+:is(#folio-app,#reader-root) .tomorrow .cover-author{color:#1d2936}
+:is(#folio-app,#reader-root) .blue-hour .cover-title{font-size:21cqw;top:10%}
+:is(#folio-app,#reader-root) .blue-hour .art{width:58%;left:21%;bottom:8%}
+
+:is(#folio-app,#reader-root) .book-cover .cover-kicker{font-size:4.6cqw;line-height:1.2;letter-spacing:.1em;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+:is(#folio-app,#reader-root) .blue-hour .cover-kicker{font-size:5cqw;letter-spacing:.2em}
+:is(#folio-app,#reader-root) .slowly .art::after{border-width:4.5cqw}

@@ -1,14 +1,16 @@
 # Folio
 
-A working Tahoe / Golden Gate design preview of Folio: the floating Liquid Glass pill header, editorial book feature, and labeled phone tabs. The original illustrated covers and six-book catalog remain central. See DESIGN.md for the design rationale. The site includes search, book details, a saved library, account forms, and a paginated reader.
+Folio implements the supplied “Xilo Folio Apple redesign”: a sunset background, floating glass navigation, a six-cover hero shelf, genre filters, collections, and illustrated book pages. The site includes catalog search, a saved library, Firebase account forms, and a paginated reader.
 
-The reader supports a continuous GPU page mesh with smooth shading, finger-tracked curls, momentum-based release, touch swipes, page-edge taps, keyboard navigation, chapter contents, font-size changes, paper/sepia/night themes, and responsive single-page/two-page reading. Reading positions use a word offset so changing the layout keeps the same passage in view. Reduced-motion preferences remove the 3D animation.
+The framed reader uses locally hosted Newsreader typography, Paper/Sepia/Night swatches, text-size controls, chapter navigation, book search, and a progress slider. It supports a continuous GPU page mesh with smooth shading, finger-tracked curls, momentum-based release, touch swipes, page-edge taps, keyboard navigation, chapter contents, font-size changes, paper/sepia/night themes, and responsive single-page/two-page reading. Reading positions use a word offset so changing the layout keeps the same passage in view. Reduced-motion preferences remove the 3D animation.
 
 The six bundled titles contain original illustrative stories, each with three chapters. They are available for guest reading. Guest libraries and progress stay on the device; configured Firebase accounts use private Firestore library/progress records.
 
-Folio's floating navigation, search, account dialog, and reader controls use a Liquid Glass-inspired web material. Following [Apple's Liquid Glass design guidance](https://developer.apple.com/videos/play/wwdc2025/219/), the treatment stays in the functional layer: book covers, shelves, and reading pages retain their own solid materials. Shared styles in `css/materials.css` combine a frosted fill, directional highlight, fine edge, and soft shadow. Inner controls use simple fills rather than stacking backdrop filters. This is a CSS adaptation, not Apple's native optical rendering system.
+Folio's floating navigation, shelves, collection cards, and account controls use the translucent glass treatment in the supplied design. Shared styles in `css/materials.css` combine a frosted fill, directional highlight, fine edge, and soft shadow. Book covers and reading pages retain solid materials.
 
 The material follows system appearance and the reader's paper, sepia, or night theme. Browsers without backdrop-filter get solid surfaces. Reduced transparency, increased contrast, forced colors, and reduced motion receive explicit fallbacks; support for the reduced-transparency media query depends on the browser.
+
+Newsreader is distributed under the SIL Open Font License; its license is included in `fonts/Newsreader-LICENSE.txt`. The design is implemented with native HTML, CSS, and JavaScript modules. The attached prototype runtime is not required.
 
 Live website: [xilo-folio.web.app](https://xilo-folio.web.app). It runs in Firebase project `xilo-web-systems` on the dedicated Hosting site `xilo-folio`.
 

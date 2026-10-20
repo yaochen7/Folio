@@ -1,4 +1,5 @@
 const paths={
+ plus:'<path d="M12 5v14M5 12h14"/>',
  list:'<path d="M4 5h16M4 10h16M4 15h10"/><circle cx="5" cy="20" r=".8"/><circle cx="10" cy="20" r=".8"/><circle cx="15" cy="20" r=".8"/>',
  more:'<circle cx="5" cy="12" r="1.5"/><circle cx="12" cy="12" r="1.5"/><circle cx="19" cy="12" r="1.5"/>',
  compass:'<circle cx="12" cy="12" r="9"/><path d="m16 8-2.5 5.5L8 16l2.5-5.5L16 8Z"/>',

@@ -1,9 +1,10 @@
 import { icon } from './icons.js';
+import { renderCover } from './books.js';
 import { curlShape, dragProgress, completesTurn, settleProgress } from './page-curl.js';
 import { createPageCurlRenderer } from './page-curl-renderer.js';
 
 const STORAGE_KEY = 'folio.reader.settings.v1';
-const DEFAULT_SETTINGS = { fontSize: 18, theme: 'paper', spread: true };
+const DEFAULT_SETTINGS = { fontSize: 19, theme: 'sepia', spread: true };
 const THEMES = ['paper', 'sepia', 'night'];
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const wordsOf = value => String(value || '').trim().split(/\s+/u).filter(Boolean);
@@ -12,8 +13,8 @@ function readSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') || {};
     return {
-      fontSize: clamp(Number(saved.fontSize) || 18, 14, 26),
-      theme: THEMES.includes(saved.theme) ? saved.theme : 'paper',
+      fontSize: clamp(Number(saved.fontSize) || 19, 14, 26),
+      theme: THEMES.includes(saved.theme) ? saved.theme : 'sepia',
       spread: saved.spread !== false
     };
   } catch { return { ...DEFAULT_SETTINGS }; }
@@ -73,19 +74,21 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   let previousFocus = null;
   let openedBodyLock = false;
   let curlRenderer = null, curlUnavailable = false, warmTimer = 0;
-  let chromeVisible = true, searchHighlight = '';
+  let chromeVisible = true, searchHighlight = '', openingTimer = 0;
 
   root.hidden = true;
   root.innerHTML = `
     <section class="fr-reader" role="dialog" aria-modal="true" aria-labelledby="fr-book-title" data-fr-theme="paper">
       <header class="fr-toolbar">
-        <div class="fr-title-group"><h1 id="fr-book-title" class="fr-book-title"></h1><p class="fr-book-author" hidden></p></div>
         <button class="fr-tool fr-close fr-round folio-glass" type="button" data-fr-action="close" aria-label="Close reader">${icon('x')}</button>
+        <button class="fr-title-group fr-menu-toggle" type="button" data-fr-action="menu" aria-label="Reading controls" aria-expanded="false" aria-controls="fr-reader-menu"><span id="fr-book-title" class="fr-book-title"></span><span class="fr-book-author"></span></button>
+        <div class="fr-quick-settings folio-glass" role="group" aria-label="Reading appearance"><div class="fr-quick-themes">${THEMES.map(theme=>`<button class="fr-quick-theme" type="button" data-fr-action="theme" data-fr-theme-option="${theme}" aria-label="${theme[0].toUpperCase()+theme.slice(1)} theme" aria-pressed="false"><span aria-hidden="true"></span></button>`).join('')}</div><div class="fr-quick-font"><button class="fr-quick-size fr-size-button" type="button" data-fr-action="smaller" aria-label="Decrease text size">A</button><button class="fr-quick-size fr-size-button" type="button" data-fr-action="larger" aria-label="Increase text size">A</button></div></div>
       </header>
       <div class="fr-stage"><div class="fr-book" aria-label="Book pages" aria-busy="true" tabindex="-1"></div></div>
       <footer class="fr-footer">
-        <span class="fr-page-count" aria-label="Reading position"></span>
-        <button class="fr-tool fr-menu-toggle fr-round folio-glass" type="button" data-fr-action="menu" aria-label="Reading controls" aria-expanded="false" aria-controls="fr-reader-menu">${icon('list')}</button>
+        <button class="fr-page-nav fr-round folio-glass" type="button" data-fr-action="previous" aria-label="Previous page">${icon('chevron-left')}</button>
+        <div class="fr-footer-position"><input class="fr-progress-range" type="range" min="0" max="1" step="1" value="0" aria-label="Reading progress"><div class="fr-position-caption"><span class="fr-page-count" aria-label="Reading position"></span><span class="fr-pages-left"></span></div></div>
+        <button class="fr-page-nav fr-round folio-glass" type="button" data-fr-action="next" aria-label="Next page">${icon('chevron-right')}</button>
       </footer>
       <aside class="fr-reader-menu" id="fr-reader-menu" aria-label="Reading controls" hidden>
         <button class="fr-menu-row fr-contents-toggle folio-glass" type="button" data-fr-action="contents" aria-expanded="false" aria-controls="fr-contents-panel"><span>Contents <span class="fr-menu-percentage"></span></span>${icon('list')}</button>
@@ -95,7 +98,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
       <aside class="fr-panel fr-contents-panel folio-glass" id="fr-contents-panel" aria-labelledby="fr-contents-heading" hidden>
         <div class="fr-panel-heading"><h2 id="fr-contents-heading">Contents</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close contents">${icon('x')}</button></div>
         <ol class="fr-chapter-list"></ol>
-        <div class="fr-position-controls"><p class="fr-current-chapter"></p><input class="fr-progress-range" type="range" min="0" max="1" step="1" value="0" aria-label="Reading progress"><div class="fr-position-actions"><button class="fr-page-nav" type="button" data-fr-action="previous" aria-label="Previous page">${icon('chevron-left')}<span>Previous</span></button><button class="fr-page-nav" type="button" data-fr-action="next" aria-label="Next page"><span>Next</span>${icon('chevron-right')}</button></div></div>
+        <p class="fr-current-chapter"></p>
       </aside>
       <aside class="fr-panel fr-search-panel folio-glass" id="fr-search-panel" aria-labelledby="fr-search-heading" hidden>
         <div class="fr-panel-heading"><h2 id="fr-search-heading">Search Book</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close book search">${icon('x')}</button></div>
@@ -150,8 +153,8 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     reader.style.setProperty('--fr-font-size', `${settings.fontSize}px`);
     fontValue.value = `${settings.fontSize} px`;
     fontValue.textContent = `${settings.fontSize} px`;
-    root.querySelector('[data-fr-action="smaller"]').disabled = settings.fontSize <= 14;
-    root.querySelector('[data-fr-action="larger"]').disabled = settings.fontSize >= 26;
+    root.querySelectorAll('[data-fr-action="smaller"]').forEach(button=>button.disabled = settings.fontSize <= 14);
+    root.querySelectorAll('[data-fr-action="larger"]').forEach(button=>button.disabled = settings.fontSize >= 26);
     root.querySelectorAll('[data-fr-theme-option]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.frThemeOption === settings.theme)));
     spreadInput.checked = settings.spread && !spreadInput.disabled;
   }
@@ -162,7 +165,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
       heading.className = 'fr-chapter-opening';
       const number = document.createElement('p');
       number.className = 'fr-chapter-number';
-      number.textContent = `Chapter ${block.chapterIndex + 1}`;
+      number.textContent = `Chapter ${['One','Two','Three'][block.chapterIndex] || block.chapterIndex + 1}`;
       const title = document.createElement('h2');
       title.className = 'fr-chapter-heading';
       title.textContent = block.text;
@@ -312,6 +315,11 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
           low = Math.max(1, low);
           block.text = remaining.slice(0, low).join(' ');
           candidate.textContent = block.text;
+          // Move a new paragraph to the next page rather than strand one line.
+          const lineHeight=parseFloat(getComputedStyle(candidate).lineHeight);
+          if (current.end > current.start && candidate.getBoundingClientRect().height < lineHeight * 1.9) {
+            candidate.remove(); finishPage(); continue;
+          }
           current.blocks.push(block);
           consumed += low;
           current.end = paragraph.start + consumed;
@@ -358,7 +366,9 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     chapterElement.textContent = chapter.title;
     chapterElement.setAttribute('aria-label', `Contents, current chapter ${chapter.title}`);
     pageCountElement.textContent = !chromeVisible ? String(pageIndex + 1) : spread && endPage > pageIndex + 1
-      ? `${pageIndex + 1}–${endPage} of ${pages.length}` : `${pageIndex + 1} of ${pages.length}`;
+      ? `Pages ${pageIndex + 1}–${endPage} of ${pages.length}` : `Page ${pageIndex + 1} of ${pages.length}`;
+    const left = pages.length - endPage;
+    root.querySelector('.fr-pages-left').textContent = left ? `${left} ${left === 1 ? 'page' : 'pages'} left` : 'End of story';
     root.querySelector('.fr-menu-percentage').textContent = `· ${Math.round(readingFraction() * 100)}%`;
     range.max = String(Math.max(1, normalized.totalWords - 1));
     range.value = String(pageIndex === lastStartIndex() ? range.max : clamp(anchorOffset, 0, normalized.totalWords - 1));
@@ -393,16 +403,16 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     const width = stage.clientWidth - parseFloat(stageStyle.paddingLeft) - parseFloat(stageStyle.paddingRight);
     const height = stage.clientHeight - parseFloat(stageStyle.paddingTop) - parseFloat(stageStyle.paddingBottom);
     if (!width || !height) return;
-    const spreadAvailable = width >= 940;
+    const spreadAvailable = reader.clientWidth >= 900;
     spreadInput.disabled = !spreadAvailable;
     root.querySelector('.fr-spread-note').textContent = spreadAvailable ? 'For a little more room.' : 'Available in a wider window.';
     spread = settings.spread && spreadAvailable;
     spreadInput.checked = spread;
     const safeTop = parseFloat(getComputedStyle(reader).getPropertyValue('--fr-safe-top')) || 0;
     const safeBottom = parseFloat(getComputedStyle(reader).getPropertyValue('--fr-safe-bottom')) || 0;
-    const bookWidth = Math.floor(Math.min(width, spread ? 1200 : 760));
-    pageHeight = Math.floor(Math.max(120, height));
-    pageWidth = spread ? Math.floor(bookWidth / 2) : bookWidth;
+    const availableHeight = Math.max(120, Math.min(height, spread ? 780 : 860));
+    pageWidth = Math.floor(Math.min(width / (spread ? 2 : 1), spread ? 580 : 640, availableHeight * (spread ? .7 : .74)));
+    pageHeight = Math.floor(Math.min(availableHeight, pageWidth * (spread ? 1.6 : 1.8)));
     const key = `${pageWidth}:${pageHeight}:${spread}:${settings.fontSize}:${safeTop}:${safeBottom}`;
     if (!force && key === lastMeasureKey) return;
     lastMeasureKey = key;
@@ -411,8 +421,10 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     bookElement.classList.toggle('fr-is-spread', spread);
     bookElement.style.width = `${pageWidth * (spread ? 2 : 1)}px`;
     bookElement.style.height = `${pageHeight}px`;
-    reader.style.setProperty('--fr-page-inset-x', `${Math.round(Math.max(24, pageWidth * (pageWidth < 600 ? .095 : .11)))}px`);
-    reader.style.setProperty('--fr-page-inset-y', `${safeTop + (pageHeight < 480 ? 48 : 68)}px`);
+    reader.style.setProperty('--fr-page-inset-x', `${reader.clientWidth < 520 ? 22 : pageWidth < 440 ? 32 : 44}px`);
+    reader.style.setProperty('--fr-page-inset-y', `${reader.clientWidth < 520 || pageHeight < 520 ? 24 : 36}px`);
+    reader.style.setProperty('--fr-page-inset-bottom', `${reader.clientWidth < 520 ? 16 : 22}px`);
+    reader.style.setProperty('--fr-bar-width', `${Math.max(pageWidth * (spread ? 2 : 1), 560)}px`);
     measurePage.style.width = `${pageWidth}px`;
     measurePage.style.height = `${pageHeight}px`;
     pages = paginate();
@@ -423,11 +435,22 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     emitProgress();
   }
 
+  function cancelOpening() { clearTimeout(openingTimer); bookElement.querySelector('.fr-opening-cover')?.remove(); }
+
+  function revealBook() {
+    cancelOpening();
+    if (motionQuery.matches || anchorOffset > 0) return;
+    const cover=document.createElement('div');cover.className='fr-opening-cover';cover.setAttribute('aria-hidden','true');cover.innerHTML=renderCover(book);bookElement.append(cover);
+    openingTimer=setTimeout(()=>cover.remove(),1050);
+  }
+
   function setChrome(visible) {
     chromeVisible = visible;
     reader.dataset.frChrome = visible ? 'shown' : 'hidden';
+    const toolbar=root.querySelector('.fr-toolbar'),footer=root.querySelector('.fr-footer');
+    if (!visible && (toolbar.contains(document.activeElement) || footer.contains(document.activeElement))) bookElement.focus({ preventScroll: true });
+    toolbar.inert = !visible; footer.inert = !visible;
     closeButton.inert = !visible; menuButton.inert = !visible;
-    if (!visible && [closeButton, menuButton].includes(document.activeElement)) bookElement.focus({ preventScroll: true });
     updateChrome();
   }
 
@@ -608,6 +631,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
 
   function requestTurn(direction) {
+    cancelOpening();
     if (!isOpen || !pages.length) return;
     closePanels();
     if (turn) { queuedDirection = direction; return; }
@@ -625,6 +649,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
 
   function jumpToOffset(offset, announce = true) {
+    cancelOpening();
     abortTurn();
     anchorOffset = clamp(Number(offset) || 0, 0, Math.max(0, normalized.totalWords - 1));
     pageIndex = pageForOffset(anchorOffset);
@@ -665,6 +690,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   function onPointerDown(event) {
     if (!isOpen || pointer || !event.isPrimary || event.button !== 0 || event.pointerId === dismissedPointerId) return;
     if (closePanels()) return;
+    cancelOpening();
     if (event.target.closest('button, a, input, select, textarea')) return;
     const rect = bookElement.getBoundingClientRect();
     const x = event.clientX - rect.left;
@@ -877,18 +903,22 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
       chapterList.append(item);
     });
     closePanels();
-    chromeVisible = true; reader.dataset.frChrome = 'shown'; closeButton.inert = false; menuButton.inert = false;
+    setChrome(true);
     searchHighlight = ''; bookSearch.value = ''; searchResults.replaceChildren();
     applySettings();
     lastMeasureKey = '';
     reflow(true);
     closeButton.focus({ preventScroll: true });
+    const openedBook=book;
+    if(document.fonts?.check(`${settings.fontSize}px Newsreader`)) revealBook();
+    else document.fonts?.load(`${settings.fontSize}px Newsreader`).then(()=>{if(isOpen&&book===openedBook){reflow(true);revealBook();}}).catch(()=>{});
     announcement.textContent = `${book.title || 'Book'} opened. ${normalized.chapters[pages[pageIndex]?.chapterIndex || 0].title}.`;
   }
 
   function close(notify = true) {
     if (!isOpen) return;
     clearTimeout(progressTimer);
+    cancelOpening();
     // Flush the last settled location; never save an unfinished drag.
     if (book && normalized?.totalWords) {
       try { onProgress(book.id, { wordOffset: anchorOffset, fraction: readingFraction() }); }
