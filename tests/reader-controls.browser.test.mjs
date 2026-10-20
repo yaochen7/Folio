@@ -27,8 +27,8 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    await openMenu(page);
    assert.ok(await page.evaluate(()=>{
     const bounds=[...document.querySelectorAll('.fr-controls-host button')].map(e=>e.getBoundingClientRect());
-    return bounds.every(r=>r.left>=12&&r.right<=innerWidth-12&&r.top>=0&&r.bottom<=innerHeight-8&&r.width>=44&&r.height>=44)&&bounds.every((r,i)=>bounds.every((s,j)=>i===j||r.right<=s.left+1||s.right<=r.left+1||r.bottom<=s.top+1||s.bottom<=r.top+1));
-   }));
+    return bounds.every(r=>r.left>=12&&r.right<=innerWidth-12&&r.top>=0&&r.bottom<=innerHeight-8&&r.width>=44&&r.height>=44)&&bounds.every((r,i)=>bounds.every((s,j)=>i===j||Math.max(s.left-r.right,r.left-s.right,s.top-r.bottom,r.top-s.bottom)>=18));
+   }),'expanded controls have visible breathing room');
    assert.ok(await page.locator('[data-fr-action="previous"]').isDisabled());
    await page.locator('.fr-appearance-toggle').click();
    const offset=await page.locator('.fr-progress-range').inputValue();
@@ -72,6 +72,25 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
    await page.locator('.fr-book[aria-busy="false"]').waitFor();
    assert.equal(await page.locator('.fr-menu-toggle').count(),1);
    assert.deepEqual(errors,[]);
+   await context.close();
+  });
+  await t.test('spacing survives short screens and safe areas',async()=>{
+   const context=await browser.newContext({viewport:{width:844,height:390},hasTouch:true,isMobile:true});
+   await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
+   const page=await context.newPage();
+   await page.goto(base+'#read/quiet');
+   await page.locator('.fr-book[aria-busy="false"]').waitFor();
+   await page.waitForTimeout(1100);
+   await page.addStyleTag({content:'#reader-root .fr-reader{--fr-safe-left:47px;--fr-safe-right:47px;--fr-safe-bottom:21px}'});
+   await openMenu(page);
+   for(const viewport of [{width:844,height:390},{width:568,height:300}]){
+    await page.setViewportSize(viewport);
+    await page.waitForTimeout(700);
+    assert.ok(await page.evaluate(()=>{
+     const bounds=[...document.querySelectorAll('.fr-controls-host button')].map(e=>e.getBoundingClientRect());
+     return bounds.every(r=>r.left>=47+12&&r.right<=innerWidth-47-12&&r.top>=16&&r.bottom<=innerHeight-21-12&&r.width>=44&&r.height>=44)&&bounds.every((r,i)=>bounds.every((s,j)=>i===j||Math.max(s.left-r.right,r.left-s.right,s.top-r.bottom,r.top-s.bottom)>=18));
+    }),'controls retain margins and 44px targets in landscape');
+   }
    await context.close();
   });
  }finally{await browser.close();}
