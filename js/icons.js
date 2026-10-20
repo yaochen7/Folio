@@ -15,6 +15,8 @@ const paths={
  'chevron-left':'<path d="m15 5-7 7 7 7"/>',
  'arrow-right':'<path d="M4 12h16m-6-6 6 6-6 6"/>',
  user:'<circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/>',
+ 'credit-card':'<rect x="2" y="5" width="20" height="14" rx="3"/><path d="M2 10h20M6 15h3"/>',
+ lock:'<rect x="5" y="10" width="14" height="11" rx="3"/><path d="M8 10V7a4 4 0 0 1 8 0v3"/>',
  check:'<path d="m5 12 4 4L19 6"/>',
  'log-out':'<path d="M9 3H4v18h5m6-16 7 7-7 7m-7-7h14"/>',
  cloud:'<path d="M7 18a5 5 0 1 1 .3-10 6 6 0 0 1 11.5 1.6A4.2 4.2 0 0 1 18 18H7Z"/>',

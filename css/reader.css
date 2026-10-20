@@ -204,6 +204,12 @@ body.reader-open{overflow:hidden;overscroll-behavior:none}
 #reader-root .fr-controls-host{transition:opacity .18s ease}
 #reader-root .fr-reader:is([data-fr-appearance="opening"],[data-fr-appearance="open"]) .fr-controls-host{opacity:0;transition:opacity .12s ease}
 #reader-root .fr-reader[data-fr-appearance="closing"] .fr-controls-host{transition:opacity .22s ease .12s}
+#reader-root .fr-preview-continue{position:absolute;z-index:50;left:calc(24px + var(--fr-safe-left));bottom:calc(18px + var(--fr-safe-bottom));width:min(252px,calc(100% - 108px - var(--fr-safe-left) - var(--fr-safe-right)));height:52px;display:flex;align-items:center;justify-content:center;gap:8px;padding:0 14px;border:1px solid rgb(255 255 255 / .32);border-radius:999px;background:linear-gradient(180deg,#ff7a3d,#e8441a);color:white;font-size:12px;font-weight:500;box-shadow:inset 0 1px 0 #fff5,0 6px 20px #0002}
+#reader-root .fr-preview-continue svg{width:16px;height:16px}
+#reader-root .fr-reader[data-fr-preview-end="true"] .fr-footer{visibility:hidden}
+#reader-root .fr-reader[data-fr-controls="expanded"] .fr-preview-continue{visibility:hidden;pointer-events:none}
+#reader-root .fr-chapter-list .fr-locked-chapter{position:relative;padding-right:36px;color:var(--fr-muted)}
+#reader-root .fr-locked-chapter svg{position:absolute;right:10px;top:calc(50% - 9px);width:16px;height:18px}
 
 /* Mobile reading uses the whole viewport; only text and controls respect the
    device's safe areas. Keep the framed spread for wider reading windows. */

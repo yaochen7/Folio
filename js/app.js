@@ -4,6 +4,9 @@ import {collections,presentation} from './presentation.js';
 import {createReader} from './reader.js';
 import {createNavigation} from './navigation.js';
 import * as cloud from './firebase-service.js';
+import {createMembershipService,previewLimit,membershipKey} from './membership.js';
+import {createMembershipDialog} from './membership-ui.js';
+import {accountPage} from './account-page.js';
 
 const main=document.querySelector('#main-content');
 const dialog=document.querySelector('#account-dialog');
@@ -17,6 +20,28 @@ const state={homeGenre:'All',books:[...originalBooks],user:null,firebase:'loadin
 let libraryUnsubscribe,progressUnsubscribe,toastTimer,ignoreReaderClose=false,authGeneration=0,pendingRouteFocus,accountReturnFocus;
 const pendingProgress=new Map();
 const syncingLibrary=new Map();
+const membership=createMembershipService();
+const membershipDialog=document.querySelector('#membership-dialog');
+let membershipTimer;
+const subscription=()=>membership.read(state.user?.uid);
+const plusActive=()=>subscription()?.active===true;
+const membershipFlow=createMembershipDialog({dialog:membershipDialog,service:membership,getUid:()=>state.user?.uid,
+ onChange:()=>refreshMembership(),
+ onDismiss:({completed,book,wordOffset})=>{
+  const current=state.readerBook&&getBook(state.readerBook);
+  if(current&&(completed||reader.preview===plusActive()))reader.open(current,{wordOffset:Math.max(completed&&book?.id===current.id?wordOffset||0:0,state.progress[current.id]?.wordOffset||0),preview:!plusActive()});
+  else if(completed&&!state.readerBook)navigate('#account');
+ }
+});
+function refreshMembership(){
+ clearTimeout(membershipTimer);const record=subscription();
+ if(record?.active)membershipTimer=setTimeout(()=>refreshMembership(),Math.min(2147483647,record.expiresAt-Date.now()+20));
+ if(state.readerBook&&!membershipDialog.open&&reader.preview===plusActive()){const book=getBook(state.readerBook);if(book)reader.open(book,{wordOffset:state.progress[book.id]?.wordOffset||0,preview:!plusActive()});}
+ if(location.hash==='#account')refreshRouteContent();
+}
+function openMembership(id){const book=id&&getBook(id);membershipFlow.open(book?{book,wordOffset:Math.max(previewLimit(book),state.progress[id]?.wordOffset||0)}:{});}
+function setMembershipRenewal(renew){try{membership.setRenewal(state.user?.uid,renew);notify(renew?'Demo renewal resumed. No real payments will be taken.':'Demo renewal cancelled. Your access continues until the end of this period.');}catch(error){notify(error.message);}refreshMembership();}
+function renderProfile(){main.innerHTML=accountPage({user:state.user,saved:state.saved,progress:state.progress,books:state.books,membership:subscription(),cloudError:state.cloudError});}
 const storageKey=uid=>'folio.library.v1.'+(uid||'guest');
 function readCache(uid){try{const value=JSON.parse(localStorage.getItem(storageKey(uid))||'{}');return{saved:Array.isArray(value.saved)?value.saved.filter(id=>typeof id==='string'):[],progress:value.progress&&typeof value.progress==='object'?value.progress:{},mutations:value.mutations&&typeof value.mutations==='object'?value.mutations:{}};}catch{return{saved:[],progress:{},mutations:{}};}}
 function persistCache(){try{localStorage.setItem(storageKey(state.user?.uid),JSON.stringify({saved:[...state.saved],progress:state.progress,mutations:state.mutations}));}catch{}}
@@ -45,7 +70,7 @@ function renderPreservingFocus(render){
 }
 function refreshRouteContent(){
  if(state.readerBook)return;const hash=location.hash||'#discover';
- renderPreservingFocus(()=>{if(hash==='#library')renderLibrary();else if(hash.startsWith('#book/')){let id;try{id=decodeURIComponent(hash.slice(6));}catch{}renderDetails(id);}else if(isSearchRoute(hash)||hash==='#browse')renderSearch();else if(hash==='#home'||hash==='#discover'||hash==='#collections'||!location.hash)renderHome();});
+ renderPreservingFocus(()=>{if(hash==='#account')renderProfile();else if(hash==='#library')renderLibrary();else if(hash.startsWith('#book/')){let id;try{id=decodeURIComponent(hash.slice(6));}catch{}renderDetails(id);}else if(isSearchRoute(hash)||hash==='#browse')renderSearch();else if(hash==='#home'||hash==='#discover'||hash==='#collections'||!location.hash)renderHome();});
  updateHeader();
 }
 function coverButton(book,extra=''){return `<button class="cover-button ${extra}" type="button" data-action="detail" data-book="${esc(book.id)}" aria-label="Discover ${esc(book.title)} by ${esc(book.author)}">${renderCover(book)}</button>`;}
@@ -54,7 +79,7 @@ function renderHome(){
  const shelf=state.books.filter(book=>state.homeGenre==='All'||book.category===state.homeGenre);
  main.innerHTML=`<div class="home-view">
   <section class="gallery-hero" aria-labelledby="hero-title">
-   <p class="story-badge"><span aria-hidden="true"></span>Original stories · Free to read</p>
+   <p class="story-badge"><span aria-hidden="true"></span>Original stories · First chapter free</p>
    <h1 id="hero-title">A world between the covers.</h1>
    <p class="lead">Discover original stories and make a little time to read.</p>
    <div class="action-row"><button class="pill" type="button" data-action="detail" data-book="quiet">Start reading</button><a class="glass-button" href="#discover">Browse the collection</a></div>
@@ -65,7 +90,7 @@ function renderHome(){
    <div class="book-grid">${shelf.map(bookCard).join('')}</div><p class="sr-only" role="status">${shelf.length} ${shelf.length===1?'story':'stories'} in ${state.homeGenre}</p>
   </div></section>
   <section class="collections-section" id="collections" aria-labelledby="collections-title"><h2 id="collections-title">Collections. <span>Something for every mood.</span></h2><div class="collection-cards">${collections.map(collection=>{const books=state.books.filter(book=>book.category===collection.category);return `<a class="collection-card folio-glass tone-${collection.tone}" href="#discover" data-action="collection" data-genre="${collection.category}"><div><span class="collection-count">${books.length} ${books.length===1?'story':'stories'}</span><h3>${collection.category}</h3><p>${collection.description}</p></div><div class="collection-covers" aria-hidden="true">${books.slice(0,3).map(book=>`<div>${renderCover(book)}</div>`).join('')}</div></a>`;}).join('')}</div></section>
-  <section class="library-invitation" aria-labelledby="library-invitation-title"><div class="invitation-sheet folio-glass"><h2 id="library-invitation-title">Your library. Always with you.</h2><p>Save books and pick up on the same page. Guest libraries stay on this device; sign in to keep them across devices.</p><div class="action-row">${state.user?`<a class="pill" href="#library">Open My Library</a><button class="glass-button" type="button" data-action="account">Your account</button>`:`<button class="pill" type="button" data-action="account">Sign in</button><a class="glass-button" href="#library">Continue as guest</a>`}</div></div></section>
+  <section class="library-invitation" aria-labelledby="library-invitation-title"><div class="invitation-sheet folio-glass"><h2 id="library-invitation-title">Your library. Always with you.</h2><p>Save books and pick up on the same page. Guest libraries stay on this device; sign in to keep them across devices.</p><div class="action-row">${state.user?`<a class="pill" href="#library">Open My Library</a><button class="glass-button" type="button" data-action="account">Your account</button>`:`<button class="pill" type="button" data-action="signin">Sign in</button><a class="glass-button" href="#library">Continue as guest</a>`}</div></div></section>
  </div>`;
 }
 function renderDetails(id){
@@ -76,6 +101,9 @@ function renderDetails(id){
  main.innerHTML=`<section class="detail-view"><div class="detail-layout"><div class="detail-art"><div class="detail-cover">${renderCover(book)}<span class="cover-sheen" aria-hidden="true"></span></div></div><div class="detail-copy"><p class="eyebrow">${esc(book.genre)}</p><h1>${esc(book.title)}</h1><p class="detail-author">${esc(book.author)}</p><p class="detail-description">${esc(edition.blurb)}</p><div class="detail-meta"><span>${esc(book.category||'Fiction')}</span>${Number.isFinite(book.pages)?`<span>${book.pages} pages</span>`:''}<span>${Math.max(1,Math.ceil(words/230))} min read</span></div><div class="action-row"><button class="pill" type="button" data-action="read" data-book="${esc(id)}">${progress>0.001?'Continue reading':'Read sample'}</button><button class="glass-button save-text" type="button" data-action="save" data-book="${esc(id)}" aria-pressed="${saved}">${icon(saved?'check':'plus')} <span>${saved?'In My Library':'Want to Read'}</span></button></div>${progress>0.001?`<p class="detail-progress">${Math.round(progress*100)}% read <button type="button" data-action="restart" data-book="${esc(id)}">Start over</button></p>`:''}</div></div>
  <section class="opening-lines" aria-labelledby="opening-title"><div class="opening-heading"><h2 id="opening-title">Opening lines.</h2><span>Chapter One · ${esc(opening?.title||'')}</span></div><div class="excerpt-paper"><div class="excerpt-text"><p><span class="drop-cap">${esc(first.charAt(0))}</span>${esc(first.slice(1))}</p>${(opening?.paragraphs.slice(1,3)||[]).map(paragraph=>`<p>${esc(paragraph)}</p>`).join('')}</div><div class="excerpt-fade"><button type="button" data-action="read" data-book="${esc(id)}">Keep reading</button></div></div></section>
  <section class="detail-related"><h2>More from Folio.</h2><div class="book-grid related-grid">${state.books.filter(item=>item.id!==id).sort((a,b)=>(b.category===book.category)-(a.category===book.category)).map(bookCard).join('')}</div></section></section>`;
+ const readButton=main.querySelector('.detail-copy [data-action="read"]');
+ readButton.textContent=progress>0.001?'Continue reading':plusActive()?'Start reading':'Read free preview';
+ readButton.closest('.action-row').insertAdjacentHTML('afterend',`<p class="detail-membership-note">${plusActive()?'Included with your Folio Plus demo.':'Chapter One is free. <button type="button" data-action="subscribe">Every chapter with Folio Plus.</button>'}</p>`);
 }
 function libraryBookCard(book){const progress=state.progress[book.id]?.fraction||0;return `<article class="book-card library-book" data-book-id="${esc(book.id)}"><button class="cover-button library-cover" type="button" data-action="read" data-book="${esc(book.id)}" aria-label="${progress>0?'Continue reading':'Read'} ${esc(book.title)} by ${esc(book.author)}">${renderCover(book)}</button><div class="library-row-copy"><h2>${esc(book.title)}</h2><p>${esc(book.author)}</p></div><div class="library-book-meta"><span class="library-reading-status">${progress>0?`${Math.max(1,Math.round(progress*100))}%`:'Not started'}</span><details class="library-menu"><summary aria-label="Options for ${esc(book.title)}">${icon('more')}</summary><div class="library-book-menu"><button type="button" data-action="read" data-book="${esc(book.id)}">${progress>0?'Continue reading':'Start reading'}</button><button type="button" data-action="detail" data-book="${esc(book.id)}">Book details</button><button type="button" data-action="save" data-book="${esc(book.id)}" aria-pressed="true">Remove from library</button></div></details></div></article>`;}
 function renderLibrary(){const selected=state.books.filter(book=>state.saved.has(book.id)),order=[...state.saved];selected.sort(libraryView.sort==='title'?(a,b)=>a.title.localeCompare(b.title):(a,b)=>(state.progress[b.id]?.updatedAt||0)-(state.progress[a.id]?.updatedAt||0)||order.indexOf(b.id)-order.indexOf(a.id));
@@ -85,25 +113,28 @@ function renderSearch(){const entered=isSearchRoute()?state.searchQuery:'',query
  main.innerHTML=`<section class="search-view"><p class="eyebrow">Follow your curiosity.</p><h1>${query?'Find your next chapter.':'The whole collection.'}</h1><p class="search-summary" role="status">${found.length} ${found.length===1?'book':'books'} ${query?'found':'to discover'}</p>${found.length?`<div class="book-grid search-grid">${found.map(bookCard).join('')}</div>`:`<div class="search-empty">${icon('search')}<h2>Let’s try another chapter.</h2><p>No books matched “${esc(entered.trim())}”.<br>Try a different title, author, or genre.</p><button class="text-action" type="button" data-action="clear-search">Show all books ${icon('arrow-right')}</button></div>`}</section>`;
 }
 function renderNotFound(){main.innerHTML=`<section class="library-empty not-found"><h1>This story has moved.</h1><p>There’s another good book waiting for you.</p><a class="pill" href="#discover">Back to Folio</a></section>`;}
-const reader=createReader({root:document.querySelector('#reader-root'),onProgress:(id,progress)=>{
+const reader=createReader({root:document.querySelector('#reader-root'),onPreviewEnd:openMembership,onProgress:(id,progress)=>{
  if(!Number.isFinite(progress.wordOffset)||!Number.isFinite(progress.fraction))return;
+ if(!plusActive()&&(state.progress[id]?.wordOffset||0)>=previewLimit(getBook(id)))return;
  const value={wordOffset:Math.max(0,Math.floor(progress.wordOffset)),fraction:Math.min(1,Math.max(0,progress.fraction)),updatedAt:Date.now()};
  state.progress[id]=value;persistCache();queueProgress(id,value);
 },onClose:()=>{if(ignoreReaderClose)return;state.readerBook=null;navigation.backTo(state.lastRoute.startsWith('#read/')?'#discover':state.lastRoute);}});
 const navigation=createNavigation({main,render:renderRoute,captureState:()=>({homeGenre:state.homeGenre,detailReturnRoute:state.detailReturnRoute}),restoreState:saved=>{if(saved){state.homeGenre=saved.homeGenre;state.detailReturnRoute=saved.detailReturnRoute;}}});
 function renderRoute({restored=false,samePage=false}={}){
  const hash=location.hash||'#home';
- document.body.dataset.page=hash.startsWith('#book/')?'book':hash==='#library'?'library':isSearchRoute(hash)||hash==='#browse'?'search':'home';
+ document.body.dataset.page=hash.startsWith('#book/')?'book':hash==='#account'?'account':hash==='#library'?'library':isSearchRoute(hash)||hash==='#browse'?'search':'home';
  const previousFocus=document.activeElement;
  let readId;try{if(hash.startsWith('#read/'))readId=decodeURIComponent(hash.slice(6));}catch{}
  const readingBook=readId&&getBook(readId);
- if(readingBook){if(state.readerBook===readId)return;setSearch(false);dialog.close();state.readerBook=readId;reader.open(readingBook,{wordOffset:state.progress[readId]?.wordOffset||0});document.title=`${readingBook.title} — Folio`;return;}
+ if(readingBook){if(state.readerBook===readId)return;setSearch(false);dialog.close();state.readerBook=readId;reader.open(readingBook,{wordOffset:state.progress[readId]?.wordOffset||0,preview:!plusActive()});document.title=`${readingBook.title} — Folio`;return;}
+ if(membershipDialog.open)membershipFlow.close({silent:true});
  if(state.readerBook){ignoreReaderClose=true;try{reader.close();}finally{ignoreReaderClose=false;state.readerBook=null;}}
  state.lastRoute=hash;
  document.title='Folio — A world between the covers';
  document.querySelectorAll('[data-nav]').forEach(link=>{const active=hash==='#collections'?link.dataset.nav==='collections':hash==='#discover'||hash.startsWith('#book/')?link.dataset.nav==='discover':false;if(active)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');});
  if(hash.startsWith('#read/')){setSearch(false);renderNotFound();document.title='Book not found — Folio';if(!restored)focusMain();}
  else if(hash==='#library'){setSearch(false);renderLibrary();if(!restored)focusMain();}
+ else if(hash==='#account'){setSearch(false);renderProfile();document.title='Your account — Folio';if(!restored)focusMain();}
  else if(hash.startsWith('#book/')){setSearch(false);let id;try{id=decodeURIComponent(hash.slice(6));}catch{}renderDetails(id);if(!restored)focusMain();const book=getBook(id);if(book)document.title=`${book.title} — Folio`;}
  else if(isSearchRoute(hash)){state.searchQuery=new URLSearchParams(hash.split('?').slice(1).join('?')).get('q')||'';setSearch(true,{focus:!restored});renderSearch();if(!restored)window.scrollTo({top:0,behavior:'instant'});}
  else if(hash==='#browse'){setSearch(false);renderSearch();if(!restored)focusMain();}
@@ -111,7 +142,7 @@ function renderRoute({restored=false,samePage=false}={}){
  updateHeader();
  if(pendingRouteFocus){const target=pendingRouteFocus;pendingRouteFocus=null;if(target.isConnected)target.focus({preventScroll:true});}
 }
-function updateHeader(){const back=document.querySelector('.nav-back');if(back){back.href=state.detailReturnRoute||'#discover';back.querySelector('.nav-back-label').textContent=state.detailReturnRoute==='#library'?'Library':isSearchRoute(state.detailReturnRoute)?'Search':state.detailReturnRoute==='#collections'?'Collections':'Discover';}document.querySelector('.library-count').textContent=state.saved.size?String(state.saved.size):'';const button=document.querySelector('.account-button');button.querySelector('.account-label').textContent=state.user?(state.user.displayName?.trim().split(/\s+/)[0]||'Account'):'Sign in';button.setAttribute('aria-label',state.user?'Your account':'Sign in to Folio');}
+function updateHeader(){const back=document.querySelector('.nav-back');if(back){back.href=state.detailReturnRoute||'#discover';back.querySelector('.nav-back-label').textContent=state.detailReturnRoute==='#library'?'Library':state.detailReturnRoute==='#account'?'Account':isSearchRoute(state.detailReturnRoute)?'Search':state.detailReturnRoute==='#collections'?'Collections':'Discover';}document.querySelector('.library-count').textContent=state.saved.size?String(state.saved.size):'';const button=document.querySelector('.account-button');button.querySelector('.account-label').textContent=state.user?(state.user.displayName?.trim().split(/\s+/)[0]||'Account'):'Account';button.setAttribute('aria-label','Your account');}
 function refreshSavedControls(){updateHeader();document.querySelectorAll('[data-action="save"]').forEach(button=>{const book=getBook(button.dataset.book);if(!book)return;const saved=state.saved.has(book.id);button.setAttribute('aria-pressed',String(saved));if(button.classList.contains('save-text'))button.innerHTML=`${icon(saved?'check':'plus')} <span>${saved?'In My Library':'Want to Read'}</span>`;else button.setAttribute('aria-label',`${saved?'Remove':'Save'} ${book.title}${saved?' from':' to'} your library`);});}
 async function syncLibraryMutation(uid,id,mutation){
  const book=getBook(id);if(!/^[a-z0-9][a-z0-9_-]{0,79}$/.test(id)||!mutation)return false;const key=`${uid}:${id}`,previous=syncingLibrary.get(key);if(previous?.version===mutation.updatedAt)return previous.promise;
@@ -130,9 +161,11 @@ function normalizeRemote(book){
 async function handleAuth(user){
  const previousUid=state.user?.uid||null,nextUid=user?.uid||null,identityChanged=previousUid!==nextUid;
  const generation=++authGeneration;flushProgress();libraryUnsubscribe?.();progressUnsubscribe?.();
+ if(identityChanged&&membershipDialog.open)membershipFlow.close({silent:true});
  let closedBook=null;
  if(identityChanged&&state.readerBook){closedBook=state.readerBook;ignoreReaderClose=true;reader.close();ignoreReaderClose=false;state.readerBook=null;}
  state.user=user;state.cloudError=false;loadCache(user?.uid);updateHeader();
+ refreshMembership();
  if(closedBook)navigate('#book/'+encodeURIComponent(closedBook),{replace:true});
  if(dialog.open)renderAccount('',false,!user);
  if(!state.readerBook)refreshRouteContent();else refreshSavedControls();
@@ -154,7 +187,7 @@ async function handleAuth(user){
   }
   importingLibrary.forEach(id=>remote.add(id));
   for(const [id,mutation]of Object.entries(state.mutations)){if(mutation.saved)remote.add(id);else remote.delete(id);}
-  state.saved=remote;persistCache();refreshSavedControls();if(location.hash==='#library')renderPreservingFocus(renderLibrary);
+  state.saved=remote;persistCache();refreshSavedControls();if(location.hash==='#library')renderPreservingFocus(renderLibrary);else if(location.hash==='#account')renderPreservingFocus(renderProfile);
  });
  progressUnsubscribe=cloud.watchReadingProgress(user.uid,(remote,error)=>{
   if(generation!==authGeneration)return;if(error){state.cloudError=true;return;}
@@ -178,7 +211,7 @@ function renderAccount(message='',error=false,preserveInputs=false){
  if(!state.emailSignUpEnabled&&state.authMode==='signup')state.authMode='signin';
  const content=document.querySelector('#account-content');
  const entered=preserveInputs?['auth-name','auth-email','auth-password'].map(id=>({id,value:document.getElementById(id)?.value,focused:document.activeElement?.id===id})):[];
- if(state.user){content.innerHTML=`<div class="account-card"><button class="account-close icon-button" type="button" data-action="close-account" aria-label="Close account">${icon('x')}</button><span class="account-mark">${icon('user')}</span><p class="eyebrow">Your corner of Folio</p><h2 id="account-title">Hello, ${esc(state.user.displayName?.split(/\s+/)[0]||'reader')}.</h2><p class="account-email">${esc(state.user.email||'')}</p>${!state.emailSignUpEnabled?'<div class="account-switch">Accounts are managed by Xilo Web Systems.</div>':''}<div class="account-sync">${icon('cloud')}<span>${state.cloudError?'Your library is kept on this device while syncing is unavailable.':'Your library and reading place sync with your account.'}</span></div>${state.cloudError?'<button class="text-action" type="button" data-action="retry-sync">Try syncing again</button>':''}<button class="pill full-width" type="button" data-action="account-library">Open your library</button><button class="text-action account-signout" type="button" data-action="signout">Sign out ${icon('log-out')}</button></div>`;return;}
+ if(state.user&&state.authMode!=='reset'){content.innerHTML=`<div class="account-card"><button class="account-close icon-button" type="button" data-action="close-account" aria-label="Close account">${icon('x')}</button><span class="account-mark">${icon('user')}</span><p class="eyebrow">Your corner of Folio</p><h2 id="account-title">Hello, ${esc(state.user.displayName?.split(/\s+/)[0]||'reader')}.</h2><p class="account-email">${esc(state.user.email||'')}</p>${!state.emailSignUpEnabled?'<div class="account-switch">Accounts are managed by Xilo Web Systems.</div>':''}<div class="account-sync">${icon('cloud')}<span>${state.cloudError?'Your library is kept on this device while syncing is unavailable.':'Your library and reading place sync with your account.'}</span></div>${state.cloudError?'<button class="text-action" type="button" data-action="retry-sync">Try syncing again</button>':''}<button class="pill full-width" type="button" data-action="account-library">Open your library</button><button class="text-action account-signout" type="button" data-action="signout">Sign out ${icon('log-out')}</button></div>`;return;}
  const signup=state.authMode==='signup',reset=state.authMode==='reset',available=state.firebase==='ready';
  const accountSwitch=reset?`<button class="text-action" type="button" data-action="auth-mode" data-mode="signin">Back to sign in</button>`:state.emailSignUpEnabled?`${signup?'Already have an account?':'New to Folio?'} <button type="button" data-action="auth-mode" data-mode="${signup?'signin':'signup'}">${signup?'Sign in':'Create an account'}</button>`:'';
  const managedNote=!state.emailSignUpEnabled?'<div class="account-switch">Accounts are managed by Xilo Web Systems.</div>':'';
@@ -223,7 +256,7 @@ window.addEventListener('scroll',()=>{for(const menu of document.querySelectorAl
 document.addEventListener('click',async event=>{
  for(const menu of document.querySelectorAll('.library-menu[open]'))if(!menu.contains(event.target))menu.open=false;
  const navLink=event.target.closest('a[href^="#"]:not([data-action])');
- if(navLink&&!event.defaultPrevented&&event.button===0&&!event.metaKey&&!event.ctrlKey&&!event.shiftKey&&!event.altKey&&/^#(?:home|discover|collections|library|browse|search(?:\?|$)|book\/|read\/)/.test(navLink.getAttribute('href'))){event.preventDefault();if(navLink.matches('.nav-back'))navigation.backTo(state.detailReturnRoute);else navigate(navLink.getAttribute('href'),{source:navLink});return;}
+ if(navLink&&!event.defaultPrevented&&event.button===0&&!event.metaKey&&!event.ctrlKey&&!event.shiftKey&&!event.altKey&&/^#(?:home|discover|collections|library|account|browse|search(?:\?|$)|book\/|read\/)/.test(navLink.getAttribute('href'))){event.preventDefault();if(navLink.matches('.nav-back'))navigation.backTo(state.detailReturnRoute);else navigate(navLink.getAttribute('href'),{source:navLink});return;}
  const button=event.target.closest('[data-action]');if(!button)return;const action=button.dataset.action,id=button.dataset.book;
  if(action==='detail'){if(!location.hash.startsWith('#book/')&&!location.hash.startsWith('#read/'))state.detailReturnRoute=location.hash||'#home';navigate('#book/'+encodeURIComponent(id),{source:button});}
  else if(action==='read'){state.lastRoute=location.hash&&!location.hash.startsWith('#read/')?location.hash:'#book/'+id;navigate('#read/'+encodeURIComponent(id));}
@@ -237,7 +270,12 @@ document.addEventListener('click',async event=>{
  else if(action==='search'){if(searchBar.hidden)openSearch();else closeSearch();}
  else if(action==='close-search')closeSearch();
  else if(action==='clear-search'){state.searchQuery='';navigation.replaceHash(searchHash());setSearch(true,{focus:true});renderSearch();}
- else if(action==='account')openAccount();
+ else if(action==='account')navigate('#account',{source:button});
+ else if(action==='signin')openAccount();
+ else if(action==='subscribe')openMembership();
+ else if(action==='cancel-membership')setMembershipRenewal(false);
+ else if(action==='resume-membership')setMembershipRenewal(true);
+ else if(action==='reset-account-password'){openAccount();state.authMode='reset';renderAccount();document.querySelector('#auth-email').value=state.user?.email||'';}
  else if(action==='close-account')dialog.close();
  else if(action==='auth-mode'){if(state.authBusy)return;state.authMode=button.dataset.mode==='signup'&&!state.emailSignUpEnabled?'signin':button.dataset.mode;renderAccount('',false,true);document.querySelector('#auth-name,#auth-email')?.focus();}
  else if(action==='retry-sync'){if(state.user){handleAuth(state.user);renderAccount();notify('Syncing your library…');}}
@@ -252,6 +290,7 @@ dialog.addEventListener('click',event=>{if(event.target===dialog){const r=dialog
 dialog.addEventListener('close',()=>{if(!state.readerBook&&(dialog.contains(document.activeElement)||document.activeElement===document.body))(accountReturnFocus?.isConnected?accountReturnFocus:document.querySelector('.account-button')).focus({preventScroll:true});});
 document.addEventListener('keydown',event=>{if(event.key!=='Escape')return;for(const menu of document.querySelectorAll('.library-menu[open]')){menu.open=false;menu.querySelector('summary')?.focus({preventScroll:true});}});
 window.addEventListener('pagehide',flushProgress);
+window.addEventListener('storage',event=>{if(event.key===membershipKey(state.user?.uid)||event.key===null)refreshMembership();});
 window.addEventListener('online',()=>{if(state.user){const user=state.user;handleAuth(user);for(const [id,progress]of Object.entries(state.progress))queueProgress(id,progress);}});
 document.querySelector('.skip-link').addEventListener('click',event=>{event.preventDefault();main.focus({preventScroll:true});main.scrollIntoView({block:'start',behavior:'instant'});});
 hydrateIcons();navigation.start();

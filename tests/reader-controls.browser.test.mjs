@@ -18,6 +18,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
   for(const width of [320,390,1440])await t.test(String(width),async()=>{
    const context=await browser.newContext({viewport:{width,height:844},hasTouch:width<900,isMobile:width<900,reducedMotion:'no-preference'});
    await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
+   await context.addInitScript(()=>localStorage.setItem('folio.demo-membership.v1.guest',JSON.stringify({demo:true,planId:'monthly',startedAt:Date.now(),expiresAt:Date.now()+86400000,renew:true,receiptId:'FOLIO-DEMO-reader-fixture'})));
    const page=await context.newPage(),errors=[];
    page.on('pageerror',error=>errors.push(error.message));
    page.setDefaultTimeout(10000);
@@ -93,6 +94,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
   await t.test('closing controls stay visible while flowing back and can reverse',async()=>{
    const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'no-preference'});
    await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
+   await context.addInitScript(()=>localStorage.setItem('folio.demo-membership.v1.guest',JSON.stringify({demo:true,planId:'monthly',startedAt:Date.now(),expiresAt:Date.now()+86400000,renew:true,receiptId:'FOLIO-DEMO-reader-fixture'})));
    const page=await context.newPage();
    await page.goto(base+'#read/quiet');
    await page.locator('.fr-book[aria-busy="false"]').waitFor();
@@ -127,6 +129,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
   await t.test('Themes & Text shares a surface with its pill and reverses without jumping',async()=>{
    const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'no-preference'});
    await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
+   await context.addInitScript(()=>localStorage.setItem('folio.demo-membership.v1.guest',JSON.stringify({demo:true,planId:'monthly',startedAt:Date.now(),expiresAt:Date.now()+86400000,renew:true,receiptId:'FOLIO-DEMO-reader-fixture'})));
    const page=await context.newPage(),errors=[];
    page.on('pageerror',error=>errors.push(error.message));
    await page.goto(base+'#read/quiet');
@@ -185,6 +188,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
   await t.test('tap turning is an opt-in context setting that persists',async()=>{
    const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'reduce'});
    await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
+   await context.addInitScript(()=>localStorage.setItem('folio.demo-membership.v1.guest',JSON.stringify({demo:true,planId:'monthly',startedAt:Date.now(),expiresAt:Date.now()+86400000,renew:true,receiptId:'FOLIO-DEMO-reader-fixture'})));
    const page=await context.newPage();
    await page.goto(base+'#read/quiet');
    await page.locator('.fr-book[aria-busy="false"]').waitFor();
@@ -217,6 +221,7 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
   await t.test('spacing survives short screens and safe areas',async()=>{
    const context=await browser.newContext({viewport:{width:844,height:390},hasTouch:true,isMobile:true});
    await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
+   await context.addInitScript(()=>localStorage.setItem('folio.demo-membership.v1.guest',JSON.stringify({demo:true,planId:'monthly',startedAt:Date.now(),expiresAt:Date.now()+86400000,renew:true,receiptId:'FOLIO-DEMO-reader-fixture'})));
    const page=await context.newPage();
    await page.goto(base+'#read/quiet');
    await page.locator('.fr-book[aria-busy="false"]').waitFor();
