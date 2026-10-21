@@ -1,9 +1,11 @@
 import { icon } from './icons.js';
+import { renderCover } from './books.js';
 import { curlShape, dragProgress, completesTurn, settleProgress } from './page-curl.js';
 import { createPageCurlRenderer } from './page-curl-renderer.js';
+import { createReadingControls } from './reader-controls.js';
 
 const STORAGE_KEY = 'folio.reader.settings.v1';
-const DEFAULT_SETTINGS = { fontSize: 18, theme: 'paper', spread: true };
+const DEFAULT_SETTINGS = { fontSize: 19, theme: 'sepia', spread: true, tapToTurn: false };
 const THEMES = ['paper', 'sepia', 'night'];
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const wordsOf = value => String(value || '').trim().split(/\s+/u).filter(Boolean);
@@ -12,9 +14,10 @@ function readSettings() {
   try {
     const saved = JSON.parse(localStorage.getItem(STORAGE_KEY) || 'null') || {};
     return {
-      fontSize: clamp(Number(saved.fontSize) || 18, 14, 26),
-      theme: THEMES.includes(saved.theme) ? saved.theme : 'paper',
-      spread: saved.spread !== false
+      fontSize: clamp(Number(saved.fontSize) || 19, 14, 26),
+      theme: THEMES.includes(saved.theme) ? saved.theme : 'sepia',
+      spread: saved.spread !== false,
+      tapToTurn: saved.tapToTurn === true
     };
   } catch { return { ...DEFAULT_SETTINGS }; }
 }
@@ -42,11 +45,11 @@ function normalizeBook(book) {
 }
 
 /**
- * A local, dependency-free reader. Book body words are the canonical location unit.
+ * A local reader with a React liquid-controls island. Words are the location unit.
  * Book: { id, title, author, chapters: [{ title, paragraphs: string[] }] }.
  * A plain-text `contents` or `content` value is also accepted.
  */
-export function createReader({ root, onProgress = () => {}, onClose = () => {} }) {
+export function createReader({ root, onProgress = () => {}, onClose = () => {}, onPreviewEnd = () => {} }) {
   if (!(root instanceof HTMLElement)) throw new TypeError('createReader requires a root element.');
   const settings = readSettings();
   const motionQuery = matchMedia('(prefers-reduced-motion: reduce)');
@@ -73,66 +76,71 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   let previousFocus = null;
   let openedBodyLock = false;
   let curlRenderer = null, curlUnavailable = false, warmTimer = 0;
-  let chromeVisible = true, searchHighlight = '';
+  let chromeVisible = true, searchHighlight = '', openingTimer = 0;
+  let appearanceMotion = null;
+  let previewOnly = false;
 
   root.hidden = true;
   root.innerHTML = `
     <section class="fr-reader" role="dialog" aria-modal="true" aria-labelledby="fr-book-title" data-fr-theme="paper">
       <header class="fr-toolbar">
-        <div class="fr-title-group"><h1 id="fr-book-title" class="fr-book-title"></h1><p class="fr-book-author" hidden></p></div>
-        <button class="fr-tool fr-close fr-round folio-glass" type="button" data-fr-action="close" aria-label="Close reader">${icon('x')}</button>
+        <div class="fr-title-group"><span id="fr-book-title" class="fr-book-title"></span><span class="fr-book-author"></span></div>
       </header>
-      <div class="fr-stage"><div class="fr-book" aria-label="Book pages" aria-busy="true" tabindex="-1"></div></div>
+      <div class="fr-stage"><div class="fr-book" role="region" aria-label="Book pages" aria-busy="true" tabindex="-1"></div></div>
       <footer class="fr-footer">
-        <span class="fr-page-count" aria-label="Reading position"></span>
-        <button class="fr-tool fr-menu-toggle fr-round folio-glass" type="button" data-fr-action="menu" aria-label="Reading controls" aria-expanded="false" aria-controls="fr-reader-menu">${icon('list')}</button>
+        <span class="fr-page-count" aria-label="Reading position"></span><span class="fr-pages-left" hidden></span>
       </footer>
-      <aside class="fr-reader-menu" id="fr-reader-menu" aria-label="Reading controls" hidden>
-        <button class="fr-menu-row fr-contents-toggle folio-glass" type="button" data-fr-action="contents" aria-expanded="false" aria-controls="fr-contents-panel"><span>Contents <span class="fr-menu-percentage"></span></span>${icon('list')}</button>
-        <button class="fr-menu-row fr-search-toggle folio-glass" type="button" data-fr-action="search" aria-expanded="false" aria-controls="fr-search-panel"><span>Search Book</span>${icon('search')}</button>
-        <button class="fr-menu-row fr-appearance-toggle folio-glass" type="button" data-fr-action="appearance" aria-expanded="false" aria-controls="fr-appearance-panel"><span>Themes &amp; Settings</span><span class="fr-aa" aria-hidden="true">Aa</span></button>
-      </aside>
+      <div class="fr-controls-host"></div>
+      <button class="fr-preview-continue" type="button" data-fr-action="subscribe" hidden>Continue with Folio Plus ${icon('arrow-right')}</button>
       <aside class="fr-panel fr-contents-panel folio-glass" id="fr-contents-panel" aria-labelledby="fr-contents-heading" hidden>
         <div class="fr-panel-heading"><h2 id="fr-contents-heading">Contents</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close contents">${icon('x')}</button></div>
-        <ol class="fr-chapter-list"></ol>
-        <div class="fr-position-controls"><p class="fr-current-chapter"></p><input class="fr-progress-range" type="range" min="0" max="1" step="1" value="0" aria-label="Reading progress"><div class="fr-position-actions"><button class="fr-page-nav" type="button" data-fr-action="previous" aria-label="Previous page">${icon('chevron-left')}<span>Previous</span></button><button class="fr-page-nav" type="button" data-fr-action="next" aria-label="Next page"><span>Next</span>${icon('chevron-right')}</button></div></div>
+        <div class="fr-panel-body"><ol class="fr-chapter-list"></ol>
+        <div class="fr-position-controls"><p class="fr-current-chapter"></p><label class="fr-progress-label" for="fr-progress">Reading progress</label><input id="fr-progress" class="fr-progress-range" type="range" min="0" max="1" step="1" value="0" aria-label="Reading progress"></div></div>
       </aside>
       <aside class="fr-panel fr-search-panel folio-glass" id="fr-search-panel" aria-labelledby="fr-search-heading" hidden>
-        <div class="fr-panel-heading"><h2 id="fr-search-heading">Search Book</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close book search">${icon('x')}</button></div>
-        <label class="fr-search-label" for="fr-book-search">Find in this book</label><input class="fr-book-search" id="fr-book-search" type="search" placeholder="A word or phrase" autocomplete="off">
-        <p class="fr-search-status" role="status"></p><ol class="fr-search-results"></ol>
+        <div class="fr-panel-heading"><h2 id="fr-search-heading">Search this book</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close book search">${icon('x')}</button></div>
+        <div class="fr-panel-body"><label class="fr-search-label" for="fr-book-search">Find in this book</label><input class="fr-book-search" id="fr-book-search" type="search" placeholder="A word or phrase" autocomplete="off">
+        <p class="fr-search-status" role="status"></p><ol class="fr-search-results"></ol></div>
       </aside>
       <aside class="fr-panel fr-appearance-panel folio-glass" id="fr-appearance-panel" aria-labelledby="fr-appearance-heading" hidden>
-        <div class="fr-panel-heading"><h2 id="fr-appearance-heading">Make yourself comfortable.</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Close appearance settings">${icon('x')}</button></div>
+        <div class="fr-appearance-content">
+        <div class="fr-panel-heading"><h2 id="fr-appearance-heading">Make yourself comfortable.</h2><button class="fr-panel-close" type="button" data-fr-action="close-panel" aria-label="Back to reading tools">${icon('chevron-left')}</button></div>
+        <div class="fr-appearance-settings">
         <div class="fr-font-control"><span>Text size</span><div><button class="fr-size-button" type="button" data-fr-action="smaller" aria-label="Decrease text size">A−</button><output class="fr-font-value"></output><button class="fr-size-button" type="button" data-fr-action="larger" aria-label="Increase text size">A+</button></div></div>
         <fieldset class="fr-themes"><legend>Page colour</legend><div>${THEMES.map(theme => `<button class="fr-theme-option" type="button" data-fr-action="theme" data-fr-theme-option="${theme}" aria-pressed="false"><span aria-hidden="true">A</span>${theme[0].toUpperCase() + theme.slice(1)}</button>`).join('')}</div></fieldset>
         <label class="fr-spread-setting"><span>Two-page view<small class="fr-spread-note">For a little more room.</small></span><input type="checkbox" class="fr-spread-input"></label>
+        <label class="fr-spread-setting fr-tap-setting"><span>Tap to turn pages<small class="fr-spread-note">Tap the page edges to go back or forward.</small></span><input type="checkbox" class="fr-tap-input"></label>
         <p class="fr-settings-note">Your reading preferences stay on this device.</p>
+        </div>
+        </div>
       </aside>
+      <div class="fr-appearance-surface folio-glass" aria-hidden="true" hidden></div>
       <div class="fr-announcement" aria-live="polite" aria-atomic="true"></div>
     </section>`;
 
   const reader = root.querySelector('.fr-reader');
   const stage = root.querySelector('.fr-stage');
   const bookElement = root.querySelector('.fr-book');
-  const closeButton = root.querySelector('.fr-close');
+  let menuButton;
+  const controlsHost=root.querySelector('.fr-controls-host');
+  const controls=createReadingControls(controlsHost,reader);
   const titleElement = root.querySelector('.fr-book-title');
   const authorElement = root.querySelector('.fr-book-author');
   const chapterElement = root.querySelector('.fr-current-chapter');
   const pageCountElement = root.querySelector('.fr-page-count');
   const range = root.querySelector('.fr-progress-range');
   const announcement = root.querySelector('.fr-announcement');
-  const previousButton = root.querySelector('[data-fr-action="previous"]');
-  const nextButton = root.querySelector('[data-fr-action="next"]');
   const contentsPanel = root.querySelector('.fr-contents-panel');
   const appearancePanel = root.querySelector('.fr-appearance-panel');
-  const menuPanel = root.querySelector('.fr-reader-menu');
-  const menuButton = root.querySelector('.fr-menu-toggle');
+  const appearanceContent = root.querySelector('.fr-appearance-content');
+  const appearanceSurface = root.querySelector('.fr-appearance-surface');
+  const previewButton = root.querySelector('.fr-preview-continue');
   const searchPanel = root.querySelector('.fr-search-panel');
   const bookSearch = root.querySelector('.fr-book-search');
   const searchResults = root.querySelector('.fr-search-results');
   const chapterList = root.querySelector('.fr-chapter-list');
   const spreadInput = root.querySelector('.fr-spread-input');
+  const tapInput = root.querySelector('.fr-tap-input');
   const fontValue = root.querySelector('.fr-font-value');
   const measurePage = document.createElement('article');
   measurePage.className = 'fr-page fr-measure';
@@ -150,10 +158,11 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     reader.style.setProperty('--fr-font-size', `${settings.fontSize}px`);
     fontValue.value = `${settings.fontSize} px`;
     fontValue.textContent = `${settings.fontSize} px`;
-    root.querySelector('[data-fr-action="smaller"]').disabled = settings.fontSize <= 14;
-    root.querySelector('[data-fr-action="larger"]').disabled = settings.fontSize >= 26;
+    root.querySelectorAll('[data-fr-action="smaller"]').forEach(button=>button.disabled = settings.fontSize <= 14);
+    root.querySelectorAll('[data-fr-action="larger"]').forEach(button=>button.disabled = settings.fontSize >= 26);
     root.querySelectorAll('[data-fr-theme-option]').forEach(button => button.setAttribute('aria-pressed', String(button.dataset.frThemeOption === settings.theme)));
     spreadInput.checked = settings.spread && !spreadInput.disabled;
+    tapInput.checked = settings.tapToTurn;
   }
 
   function makeBlock(block) {
@@ -162,7 +171,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
       heading.className = 'fr-chapter-opening';
       const number = document.createElement('p');
       number.className = 'fr-chapter-number';
-      number.textContent = `Chapter ${block.chapterIndex + 1}`;
+      number.textContent = `Chapter ${['One','Two','Three'][block.chapterIndex] || block.chapterIndex + 1}`;
       const title = document.createElement('h2');
       title.className = 'fr-chapter-heading';
       title.textContent = block.text;
@@ -205,7 +214,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
       page.classList.add('fr-empty-page');
       const ending = document.createElement('p');
       ending.className = 'fr-end-mark';
-      ending.textContent = 'The end.';
+      ending.textContent = previewOnly ? 'End of free preview.' : 'The end.';
       body.append(ending);
       folio.textContent = '';
       page.setAttribute('aria-label', 'End of book');
@@ -215,6 +224,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
 
   function lastStartIndex() { return spread ? Math.floor((pages.length - 1) / 2) * 2 : Math.max(0, pages.length - 1); }
+  function accessibleWords() { return previewOnly ? normalized.chapters[1].start : normalized.totalWords; }
   function canTurn(direction) { return direction > 0 ? pageIndex < lastStartIndex() : pageIndex > 0; }
   function chapterForOffset(offset) {
     let index = 0;
@@ -223,7 +233,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
   function readingFraction() {
     if (!normalized?.totalWords) return 0;
-    return pageIndex === lastStartIndex() ? 1 : clamp(anchorOffset / normalized.totalWords, 0, 1);
+    return pageIndex === lastStartIndex() ? accessibleWords() / normalized.totalWords : clamp(anchorOffset / normalized.totalWords, 0, 1);
   }
   function pageForOffset(offset) {
     let low = 0;
@@ -263,6 +273,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     }
 
     normalized.chapters.forEach((chapter, chapterIndex) => {
+      if (previewOnly && chapterIndex > 0) return;
       finishPage();
       startPage(chapterIndex, chapter.start, true);
       chapter.paragraphs.forEach(paragraph => {
@@ -312,6 +323,11 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
           low = Math.max(1, low);
           block.text = remaining.slice(0, low).join(' ');
           candidate.textContent = block.text;
+          // Move a new paragraph to the next page rather than strand one line.
+          const lineHeight=parseFloat(getComputedStyle(candidate).lineHeight);
+          if (current.end > current.start && candidate.getBoundingClientRect().height < lineHeight * 1.9) {
+            candidate.remove(); finishPage(); continue;
+          }
           current.blocks.push(block);
           consumed += low;
           current.end = paragraph.start + consumed;
@@ -358,14 +374,18 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     chapterElement.textContent = chapter.title;
     chapterElement.setAttribute('aria-label', `Contents, current chapter ${chapter.title}`);
     pageCountElement.textContent = !chromeVisible ? String(pageIndex + 1) : spread && endPage > pageIndex + 1
-      ? `${pageIndex + 1}–${endPage} of ${pages.length}` : `${pageIndex + 1} of ${pages.length}`;
-    root.querySelector('.fr-menu-percentage').textContent = `· ${Math.round(readingFraction() * 100)}%`;
-    range.max = String(Math.max(1, normalized.totalWords - 1));
-    range.value = String(pageIndex === lastStartIndex() ? range.max : clamp(anchorOffset, 0, normalized.totalWords - 1));
+      ? `Pages ${pageIndex + 1}–${endPage} of ${pages.length}` : `Page ${pageIndex + 1} of ${pages.length}`;
+    if (previewOnly && chromeVisible) pageCountElement.textContent += ' · Preview';
+    previewButton.hidden = !previewOnly || canTurn(1);
+    previewButton.inert = controls.expanded;
+    reader.dataset.frPreviewEnd = String(!previewButton.hidden);
+    const left = pages.length - endPage;
+    root.querySelector('.fr-pages-left').textContent = left ? `${left} ${left === 1 ? 'page' : 'pages'} left` : 'End of story';
+    controls.update({percentage:Math.round(readingFraction()*100),previousDisabled:!canTurn(-1),nextDisabled:!canTurn(1)&&!previewOnly});
+    range.max = String(Math.max(1, accessibleWords() - 1));
+    range.value = String(pageIndex === lastStartIndex() ? range.max : clamp(anchorOffset, 0, accessibleWords() - 1));
     range.setAttribute('aria-valuetext', `${chapter.title}, page ${pageIndex + 1} of ${pages.length}`);
     range.style.setProperty('--fr-progress', `${Number(range.value) / Number(range.max) * 100}%`);
-    previousButton.disabled = !canTurn(-1);
-    nextButton.disabled = !canTurn(1);
     chapterList.querySelectorAll('button').forEach(button => {
       if (Number(button.dataset.frChapter) === chapterIndex) button.setAttribute('aria-current', 'true');
       else button.removeAttribute('aria-current');
@@ -393,26 +413,30 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     const width = stage.clientWidth - parseFloat(stageStyle.paddingLeft) - parseFloat(stageStyle.paddingRight);
     const height = stage.clientHeight - parseFloat(stageStyle.paddingTop) - parseFloat(stageStyle.paddingBottom);
     if (!width || !height) return;
-    const spreadAvailable = width >= 940;
+    const readerStyle = getComputedStyle(reader);
+    const fullBleed = readerStyle.getPropertyValue('--fr-full-bleed').trim() === '1';
+    const spreadAvailable = !fullBleed && reader.clientWidth >= 900;
     spreadInput.disabled = !spreadAvailable;
     root.querySelector('.fr-spread-note').textContent = spreadAvailable ? 'For a little more room.' : 'Available in a wider window.';
     spread = settings.spread && spreadAvailable;
     spreadInput.checked = spread;
-    const safeTop = parseFloat(getComputedStyle(reader).getPropertyValue('--fr-safe-top')) || 0;
-    const safeBottom = parseFloat(getComputedStyle(reader).getPropertyValue('--fr-safe-bottom')) || 0;
-    const bookWidth = Math.floor(Math.min(width, spread ? 1200 : 760));
-    pageHeight = Math.floor(Math.max(120, height));
-    pageWidth = spread ? Math.floor(bookWidth / 2) : bookWidth;
-    const key = `${pageWidth}:${pageHeight}:${spread}:${settings.fontSize}:${safeTop}:${safeBottom}`;
+    const safe = side => parseFloat(readerStyle.getPropertyValue(`--fr-safe-${side}`)) || 0;
+    const safeTop = safe('top'), safeBottom = safe('bottom');
+    const availableHeight = Math.max(120, Math.min(height, spread ? 780 : 860));
+    pageWidth = Math.floor(fullBleed ? width : Math.min(width / (spread ? 2 : 1), spread ? 580 : 640, availableHeight * (spread ? .7 : .74)));
+    pageHeight = Math.floor(fullBleed ? height : Math.min(availableHeight, pageWidth * (spread ? 1.6 : 1.8)));
+    const key = `${pageWidth}:${pageHeight}:${spread}:${fullBleed}:${settings.fontSize}:${safeTop}:${safeBottom}:${safe('left')}:${safe('right')}`;
     if (!force && key === lastMeasureKey) return;
     lastMeasureKey = key;
     abortTurn();
-    reader.classList.toggle('fr-compact', pageHeight < 380);
+    reader.classList.toggle('fr-compact', (fullBleed ? pageHeight - 160 - safeTop - safeBottom : pageHeight) < 380);
     bookElement.classList.toggle('fr-is-spread', spread);
     bookElement.style.width = `${pageWidth * (spread ? 2 : 1)}px`;
     bookElement.style.height = `${pageHeight}px`;
-    reader.style.setProperty('--fr-page-inset-x', `${Math.round(Math.max(24, pageWidth * (pageWidth < 600 ? .095 : .11)))}px`);
-    reader.style.setProperty('--fr-page-inset-y', `${safeTop + (pageHeight < 480 ? 48 : 68)}px`);
+    reader.style.setProperty('--fr-page-inset-x', `${reader.clientWidth < 520 ? 22 : pageWidth < 440 ? 32 : 44}px`);
+    reader.style.setProperty('--fr-page-inset-y', `${reader.clientWidth < 520 || pageHeight < 520 ? 24 : 36}px`);
+    reader.style.setProperty('--fr-page-inset-bottom', `${reader.clientWidth < 520 ? 16 : 22}px`);
+    reader.style.setProperty('--fr-bar-width', `${Math.max(pageWidth * (spread ? 2 : 1), 560)}px`);
     measurePage.style.width = `${pageWidth}px`;
     measurePage.style.height = `${pageHeight}px`;
     pages = paginate();
@@ -423,20 +447,111 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     emitProgress();
   }
 
+  function cancelOpening() { clearTimeout(openingTimer); bookElement.querySelector('.fr-opening-cover')?.remove(); }
+
+  function revealBook() {
+    cancelOpening();
+    if (motionQuery.matches || anchorOffset > 0) return;
+    const cover=document.createElement('div');cover.className='fr-opening-cover';cover.setAttribute('aria-hidden','true');cover.innerHTML=renderCover(book);bookElement.append(cover);
+    openingTimer=setTimeout(()=>cover.remove(),1050);
+  }
+
   function setChrome(visible) {
     chromeVisible = visible;
     reader.dataset.frChrome = visible ? 'shown' : 'hidden';
-    closeButton.inert = !visible; menuButton.inert = !visible;
-    if (!visible && [closeButton, menuButton].includes(document.activeElement)) bookElement.focus({ preventScroll: true });
+    const toolbar=root.querySelector('.fr-toolbar'),footer=root.querySelector('.fr-footer');
+    if (!visible && controlsHost.contains(document.activeElement)) bookElement.focus({ preventScroll: true });
+    toolbar.inert = !visible; footer.inert = !visible;controlsHost.inert=!visible || (!appearancePanel.hidden && !appearancePanel.inert);
     updateChrome();
   }
 
-  function activePanel() { return [menuPanel, contentsPanel, appearancePanel, searchPanel].find(panel => !panel.hidden); }
+  function activePanel() { return [contentsPanel, appearancePanel, searchPanel].find(panel => !panel.hidden && !panel.inert)||(controls.expanded?controlsHost:null); }
+
+  function stopAppearanceMotion() {
+    appearanceMotion?.animations.forEach(animation => animation.cancel());
+    appearanceMotion = null;
+    appearanceSurface.hidden = true;
+    appearancePanel.classList.remove('fr-appearance-transition');
+  }
+
+  function finishAppearanceMotion() {
+    if (!appearanceMotion) return;
+    const {opening} = appearanceMotion;
+    stopAppearanceMotion();
+    appearancePanel.hidden = !opening;
+    appearancePanel.inert = !opening;
+    reader.dataset.frAppearance = opening ? 'open' : 'closed';
+    reader.classList.toggle('fr-panel-open', opening);
+    controlsHost.inert = !chromeVisible || opening;
+  }
+
+  // Move one glass surface between the actual pill and panel bounds. Content
+  // animates independently, so the settings never stretch with the material.
+  function transitionAppearance(opening, trigger = root.querySelector('.fr-appearance-toggle')) {
+    const current = appearanceMotion;
+    const from = current ? appearanceSurface.getBoundingClientRect() : (opening ? trigger : appearancePanel).getBoundingClientRect();
+    const fromRadius = current ? parseFloat(getComputedStyle(appearanceSurface).borderRadius) : opening ? from.height / 2 : 28;
+    const surfaceColor = current ? getComputedStyle(appearanceSurface).backgroundColor : null;
+    const currentClip = current ? getComputedStyle(appearancePanel).clipPath : null;
+    const contentStyle = getComputedStyle(appearanceContent);
+    const contentFrom = current ? {opacity:contentStyle.opacity,transform:contentStyle.transform} : {opacity:opening ? 0 : 1,transform:opening ? 'translateY(10px)' : 'none'};
+    stopAppearanceMotion();
+    panelTrigger = trigger;
+    contentsPanel.hidden = true; searchPanel.hidden = true;
+    controls.setExpanded(true);
+    previewButton.inert = true;
+    appearancePanel.hidden = false;
+    appearancePanel.inert = !opening;
+    appearancePanel.setAttribute('aria-hidden', String(!opening));
+    reader.classList.toggle('fr-panel-open', opening);
+    reader.dataset.frAppearance = opening ? 'opening' : 'closing';
+    controlsHost.inert = opening;
+    setChrome(true);
+    trigger.setAttribute('aria-expanded', String(opening));
+    const target = (opening ? appearancePanel : trigger).getBoundingClientRect();
+    const panelBounds = appearancePanel.getBoundingClientRect();
+    const panelColor = getComputedStyle(appearancePanel).backgroundColor;
+    const pillColor = getComputedStyle(reader).getPropertyValue('--fr-liquid-tint').trim();
+    const bounds = reader.getBoundingClientRect();
+    const frame = (rect, radius) => ({left:`${rect.left-bounds.left}px`,top:`${rect.top-bounds.top}px`,width:`${rect.width}px`,height:`${rect.height}px`,borderRadius:`${radius}px`});
+    const to = frame(target, opening ? 28 : target.height / 2);
+    const clip = rect => `inset(${Math.max(0,rect.top-panelBounds.top)}px ${Math.max(0,panelBounds.right-rect.right)}px ${Math.max(0,panelBounds.bottom-rect.bottom)}px ${Math.max(0,rect.left-panelBounds.left)}px round 28px)`;
+    Object.assign(appearanceSurface.style, to);
+    appearancePanel.classList.add('fr-appearance-transition');
+    appearanceSurface.hidden = false;
+    const state = {opening,animations:[]};
+    appearanceMotion = state;
+    if (!motionQuery.matches) {
+      state.animations.push(appearanceSurface.animate([
+        {...frame(from,fromRadius),backgroundColor:surfaceColor || (opening ? pillColor : panelColor)},
+        {...to,backgroundColor:opening ? panelColor : pillColor}
+      ],{
+        duration:opening ? 500 : 420,easing:opening ? 'cubic-bezier(.22,1,.36,1)' : 'cubic-bezier(.4,0,.2,1)',fill:'both'
+      }));
+      state.animations.push(appearancePanel.animate([{clipPath:currentClip || clip(from)},{clipPath:clip(target)}],{
+        duration:opening ? 500 : 420,easing:opening ? 'cubic-bezier(.22,1,.36,1)' : 'cubic-bezier(.4,0,.2,1)',fill:'both'
+      }));
+      state.animations.push(appearanceContent.animate([contentFrom,{opacity:opening ? 1 : 0,transform:opening ? 'none' : 'translateY(8px)'}],{
+        duration:opening ? 320 : 140,delay:opening && !current ? 100 : 0,easing:'cubic-bezier(.22,1,.36,1)',fill:'both'
+      }));
+      Promise.all(state.animations.map(animation => animation.finished)).then(() => {
+        if (appearanceMotion === state) finishAppearanceMotion();
+      }).catch(() => { /* A newer action continues from the current surface. */ });
+    } else finishAppearanceMotion();
+    (opening ? appearancePanel.querySelector('button') : trigger)?.focus({preventScroll:true});
+  }
 
   function closePanels(restoreFocus = false) {
     const wasVisible = Boolean(activePanel());
-    const containedFocus = [menuPanel, contentsPanel, appearancePanel, searchPanel].some(panel => panel.contains(document.activeElement));
-    for (const panel of [menuPanel, contentsPanel, appearancePanel, searchPanel]) panel.hidden = true;
+    const containedFocus = [controlsHost, contentsPanel, appearancePanel, searchPanel].some(panel => panel.contains(document.activeElement));
+    stopAppearanceMotion();
+    reader.dataset.frAppearance = 'closed';
+    appearancePanel.inert = false;
+    appearancePanel.removeAttribute('aria-hidden');
+    controlsHost.inert = !chromeVisible;
+    for (const panel of [contentsPanel, appearancePanel, searchPanel]) panel.hidden = true;
+    controls.setExpanded(false);
+    previewButton.inert = false;
     reader.classList.remove('fr-panel-open');
     root.querySelectorAll('[aria-controls]').forEach(button => button.setAttribute('aria-expanded', 'false'));
     if (restoreFocus && wasVisible) { setChrome(true); menuButton.focus({ preventScroll: true }); }
@@ -445,11 +560,16 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
 
   function togglePanel(name, trigger) {
-    const panel = name === 'menu' ? menuPanel : name === 'contents' ? contentsPanel : name === 'search' ? searchPanel : appearancePanel;
+    if (name === 'appearance') {
+      transitionAppearance(appearancePanel.hidden || appearancePanel.inert, trigger);
+      return;
+    }
+    const panel = name === 'contents' ? contentsPanel : name === 'search' ? searchPanel : appearancePanel;
     const show = panel.hidden;
     closePanels(); setChrome(true);
     if (show) {
       panelTrigger = trigger; panel.hidden = false;
+      if (name === 'contents') contentsPanel.querySelector('.fr-chapter-list [aria-current="true"]')?.scrollIntoView({ block: 'nearest' });
       reader.classList.add('fr-panel-open');
       root.querySelectorAll(`[aria-controls="${panel.id}"]`).forEach(button => button.setAttribute('aria-expanded', 'true'));
       (name === 'search' ? bookSearch : panel.querySelector('button:not(:disabled),input:not(:disabled)'))?.focus({ preventScroll: true });
@@ -461,7 +581,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     searchResults.replaceChildren();
     if (!query) { root.querySelector('.fr-search-status').textContent = 'Search the text of this book.'; return; }
     let count = 0;
-    for (const chapter of normalized.chapters) for (const paragraph of chapter.paragraphs) {
+    for (const chapter of (previewOnly ? normalized.chapters.slice(0,1) : normalized.chapters)) for (const paragraph of chapter.paragraphs) {
       const text = paragraph.words.join(' '), index = text.toLocaleLowerCase().indexOf(query);
       if (index < 0) continue;
       count++;
@@ -470,7 +590,12 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
       const item = document.createElement('li'), button = document.createElement('button');
       button.type = 'button'; button.dataset.frAction = 'search-result'; button.dataset.frOffset = String(offset);
       const title = document.createElement('strong'); title.textContent = chapter.title;
-      const snippet = document.createElement('span'); snippet.textContent = `${index > 45 ? '…' : ''}${text.slice(Math.max(0, index - 45), index + query.length + 90)}…`;
+      // Cut the excerpt at word boundaries; mark only cuts that leave a sentence unfinished.
+      let start = Math.max(0, index - 45), end = Math.min(text.length, index + query.length + 90);
+      if (start > 0) start = text.lastIndexOf(' ', start) + 1;
+      if (end < text.length) { const space = text.indexOf(' ', end); end = space < 0 ? text.length : space; }
+      const excerpt = text.slice(start, end).trim();
+      const snippet = document.createElement('span'); snippet.textContent = `${start > 0 ? '…' : ''}${excerpt}${end < text.length && !/[.!?…]['"’”)]*$/.test(excerpt) ? '…' : ''}`;
       button.append(title, snippet); item.append(button); searchResults.append(item);
     }
     root.querySelector('.fr-search-status').textContent = `${count} ${count === 1 ? 'passage' : 'passages'} found${count > 40 ? ' · showing the first 40' : ''}`;
@@ -608,10 +733,11 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
 
   function requestTurn(direction) {
+    cancelOpening();
     if (!isOpen || !pages.length) return;
     closePanels();
     if (turn) { queuedDirection = direction; return; }
-    if (!canTurn(direction)) return;
+    if (!canTurn(direction)) { if (previewOnly && direction > 0) onPreviewEnd(book.id); return; }
     if (motionQuery.matches) {
       pageIndex = clamp(pageIndex + direction * (spread ? 2 : 1), 0, lastStartIndex());
       anchorOffset = pages[pageIndex].start;
@@ -624,12 +750,13 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     if (beginTurn(direction)) releaseTurn(true, .4);
   }
 
-  function jumpToOffset(offset, announce = true) {
+  function jumpToOffset(offset, announce = true, {keepPanel=false} = {}) {
+    cancelOpening();
     abortTurn();
-    anchorOffset = clamp(Number(offset) || 0, 0, Math.max(0, normalized.totalWords - 1));
+    anchorOffset = clamp(Number(offset) || 0, 0, Math.max(0, accessibleWords() - 1));
     pageIndex = pageForOffset(anchorOffset);
     renderBase();
-    closePanels();
+    if(!keepPanel)closePanels();
     updateChrome(announce);
     emitProgress();
   }
@@ -639,12 +766,21 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     if (!button || !root.contains(button)) return;
     const action = button.dataset.frAction;
     if (action === 'close') close();
-    else if (action === 'menu' || action === 'search') { if (action === 'search') searchBook(); togglePanel(action, button); }
+    else if(action==='menu'){
+      const show=!controls.expanded;closePanels();setChrome(true);controls.setExpanded(show);
+      previewButton.inert = show;
+      if(show&&event.detail===0)root.querySelector('.fr-contents-toggle')?.focus({preventScroll:true});
+    }
+    else if (action === 'search') { searchBook(); togglePanel(action, button); }
     else if (action === 'search-result') { searchHighlight = bookSearch.value.trim().toLocaleLowerCase(); jumpToOffset(Number(button.dataset.frOffset)); setChrome(false); bookElement.focus({ preventScroll: true }); }
     else if (action === 'previous') requestTurn(-1);
     else if (action === 'next') requestTurn(1);
+    else if (action === 'subscribe' || action === 'locked-chapter') { closePanels(); onPreviewEnd(book.id); }
     else if (action === 'contents' || action === 'appearance') togglePanel(action, button);
-    else if (action === 'close-panel') closePanels(true);
+    else if (action === 'close-panel') {
+      if (appearancePanel.contains(button)) transitionAppearance(false);
+      else closePanels(true);
+    }
     else if (action === 'chapter') {
       jumpToOffset(normalized.chapters[Number(button.dataset.frChapter)].start);
       menuButton.focus({ preventScroll: true });
@@ -665,6 +801,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   function onPointerDown(event) {
     if (!isOpen || pointer || !event.isPrimary || event.button !== 0 || event.pointerId === dismissedPointerId) return;
     if (closePanels()) return;
+    cancelOpening();
     if (event.target.closest('button, a, input, select, textarea')) return;
     const rect = bookElement.getBoundingClientRect();
     const x = event.clientX - rect.left;
@@ -696,7 +833,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
       if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy) * 1.15 || !pointer.allowDrag || pointer.hadSelection) return;
       if (window.getSelection()?.toString()) { pointer = null; return; }
       pointer.direction ||= dx < 0 ? 1 : -1;
-      if (!canTurn(pointer.direction) || dx * pointer.direction >= 0) { pointer = null; return; }
+      if ((!canTurn(pointer.direction) && !(previewOnly && pointer.direction > 0)) || dx * pointer.direction >= 0) { pointer = null; return; }
       pointer.dragging = true;
       setChrome(false);
       window.getSelection()?.removeAllRanges();
@@ -734,33 +871,39 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
       const releaseAge = Math.max(0, (event.timeStamp - ended.lastTime) / 1000 - .025);
       const releaseVelocity = ended.velocity * Math.exp(-releaseAge * 18);
       const complete = !cancelled && completesTurn(progress, releaseVelocity);
-      if (motionQuery.matches) {
+      if (previewOnly && ended.direction > 0 && !canTurn(1)) { if (complete) onPreviewEnd(book.id); }
+      else if (motionQuery.matches) {
         if (turn) { cancelAnimationFrame(frameId); finishTurn(complete); }
         else if (complete) requestTurn(ended.direction);
       }
       else releaseTurn(complete, releaseVelocity);
-    } else if (!cancelled && ended.edgeDirection && !ended.hadSelection && !window.getSelection()?.toString()) {
+    } else if (!cancelled && settings.tapToTurn && ended.edgeDirection && !ended.hadSelection && !window.getSelection()?.toString()) {
       const movement = Math.hypot(event.clientX - ended.startX, event.clientY - ended.startY);
       if (movement < 9) requestTurn(ended.edgeDirection);
     } else if (!cancelled && !ended.hadSelection && !window.getSelection()?.toString() && Math.hypot(event.clientX - ended.startX, event.clientY - ended.startY) < 9) setChrome(!chromeVisible);
   }
 
   function onKeyDown(event) {
-    if (!isOpen) return;
+    if (!isOpen || document.querySelector('dialog[open]')) return;
     if (event.key === 'Escape') {
       event.preventDefault();
+      if (!appearancePanel.hidden && !appearancePanel.inert) { transitionAppearance(false); return; }
       if (!closePanels(true)) close();
       return;
     }
     if (event.key === 'Tab') {
       setChrome(true);
-      const focusable = [...root.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href]')]
-        .filter(element => element.getClientRects().length && !element.closest('[hidden],[inert]'));
+      // An open Contents or Search panel keeps Tab inside it, as Themes & text does; Escape leaves.
+      const scope = [contentsPanel, searchPanel].find(panel => !panel.hidden) || root;
+      const focusable = [...scope.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), a[href]')]
+        .filter(element => element.tabIndex>=0&&element.getClientRects().length && !element.closest('[hidden],[inert]'));
       const first = focusable[0];
       const last = focusable[focusable.length - 1];
-      if (event.shiftKey && (document.activeElement === first || !root.contains(document.activeElement))) {
+      // The book page and anything else outside the list enter the cycle at its ends.
+      const current = focusable.indexOf(document.activeElement);
+      if (event.shiftKey && current <= 0) {
         event.preventDefault(); last?.focus();
-      } else if (!event.shiftKey && (document.activeElement === last || !root.contains(document.activeElement))) {
+      } else if (!event.shiftKey && (current === -1 || current === focusable.length - 1)) {
         event.preventDefault(); first?.focus();
       }
       return;
@@ -774,8 +917,8 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
 
   function onFocusIn(event) {
-    if (!isOpen) return;
-    if (!root.contains(event.target)) { setChrome(true); closeButton.focus({ preventScroll: true }); return; }
+    if (!isOpen || document.querySelector('dialog[open]')) return;
+    if (!root.contains(event.target)) { setChrome(true); menuButton.focus({ preventScroll: true }); return; }
     const panel = activePanel();
     if (panel && !panel.contains(event.target) && event.target !== panelTrigger) closePanels();
   }
@@ -786,6 +929,11 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     reflow(true);
   }
 
+  function onTapToTurnChange() {
+    settings.tapToTurn = tapInput.checked;
+    saveSettings();
+  }
+
   function onRangeInput() {
     if (!pages.length) return;
     const previewIndex = pageForOffset(Number(range.value));
@@ -794,7 +942,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     range.style.setProperty('--fr-progress', `${Number(range.value) / Number(range.max) * 100}%`);
   }
 
-  function onRangeChange() { jumpToOffset(Number(range.value)); }
+  function onRangeChange() { jumpToOffset(Number(range.value),true,{keepPanel:!contentsPanel.hidden}); }
   function onReaderPointerDown(event) {
     dismissedPointerId = null;
     const panel = activePanel();
@@ -804,6 +952,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   }
   function onResize() {
     if (!isOpen) return;
+    finishAppearanceMotion();
     clearTimeout(resizeTimer);
     resizeTimer = setTimeout(() => reflow(), 100);
   }
@@ -814,10 +963,15 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   };
   const onDragStart = event => event.preventDefault();
   const onVisibilityChange = () => {
+    if(isOpen){
+      if(document.hidden){closePanels();controls.unmount();}
+      else{controls.mount();menuButton=root.querySelector('.fr-menu-toggle');setChrome(chromeVisible);}
+    }
     if (document.hidden && isOpen && turn) { abortTurn(); renderBase(); updateChrome(); }
   };
   const onMotionChange = () => {
     if (!isOpen) return;
+    if (motionQuery.matches) finishAppearanceMotion();
     if (motionQuery.matches && turn) { abortTurn(); renderBase(); updateChrome(); }
     else warmPages();
   };
@@ -835,6 +989,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   document.addEventListener('keydown', onKeyDown);
   document.addEventListener('focusin', onFocusIn);
   spreadInput.addEventListener('change', onSpreadChange);
+  tapInput.addEventListener('change', onTapToTurnChange);
   bookSearch.addEventListener('input', searchBook);
   range.addEventListener('input', onRangeInput);
   range.addEventListener('change', onRangeChange);
@@ -842,7 +997,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
   const resizeObserver = typeof ResizeObserver === 'function' ? new ResizeObserver(onResize) : null;
   resizeObserver?.observe(stage);
 
-  function open(nextBook, { wordOffset = 0 } = {}) {
+  function open(nextBook, { wordOffset = 0, preview = false } = {}) {
     if (isDestroyed) throw new Error('This reader has been destroyed.');
     if (!nextBook || !nextBook.id) throw new TypeError('A book with an id is required.');
     const focusBeforeOpen = isOpen ? previousFocus : document.activeElement;
@@ -852,43 +1007,52 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     if (!normalized.chapters.length) {
       normalized = normalizeBook({ ...book, chapters: [{ title: book.title || 'Your book', paragraphs: ['The text of this book is not available yet. You can return to your library and choose another story.'] }] });
     }
-    anchorOffset = clamp(Number(wordOffset) || 0, 0, Math.max(0, normalized.totalWords - 1));
+    previewOnly = preview && normalized.chapters.length > 1;
+    anchorOffset = clamp(Number(wordOffset) || 0, 0, Math.max(0, accessibleWords() - 1));
     pageIndex = 0;
     previousFocus = focusBeforeOpen;
     isOpen = true;
     root.hidden = false;
+    controls.mount();
+    menuButton=root.querySelector('.fr-menu-toggle');
     openedBodyLock = !document.body.classList.contains('reader-open');
     document.body.classList.add('reader-open');
+    document.documentElement.classList.add('fr-reader-open');
     titleElement.textContent = book.title || 'Untitled';
-    authorElement.textContent = book.author || '';
+    authorElement.textContent = (book.author || '') + (previewOnly ? ' · Free preview' : '');
     chapterList.replaceChildren();
     normalized.chapters.forEach((chapter, index) => {
       const item = document.createElement('li');
       const button = document.createElement('button');
       button.type = 'button';
-      button.dataset.frAction = 'chapter';
+      button.dataset.frAction = previewOnly && index > 0 ? 'locked-chapter' : 'chapter';
       button.dataset.frChapter = String(index);
       const number = document.createElement('span');
-      number.textContent = `Chapter ${index + 1}`;
+      number.textContent = `Chapter ${['One','Two','Three'][index] || index + 1}${previewOnly && index > 0 ? ' · Folio Plus' : ''}`;
       const title = document.createElement('strong');
       title.textContent = chapter.title;
       button.append(number, title);
+      if (previewOnly && index > 0) { button.classList.add('fr-locked-chapter'); button.append(root.ownerDocument.createRange().createContextualFragment(icon('lock'))); }
       item.append(button);
       chapterList.append(item);
     });
     closePanels();
-    chromeVisible = true; reader.dataset.frChrome = 'shown'; closeButton.inert = false; menuButton.inert = false;
+    setChrome(true);
     searchHighlight = ''; bookSearch.value = ''; searchResults.replaceChildren();
     applySettings();
     lastMeasureKey = '';
     reflow(true);
-    closeButton.focus({ preventScroll: true });
+    bookElement.focus({ preventScroll: true });
+    const openedBook=book;
+    if(document.fonts?.check(`${settings.fontSize}px Newsreader`)) revealBook();
+    else document.fonts?.load(`${settings.fontSize}px Newsreader`).then(()=>{if(isOpen&&book===openedBook){reflow(true);revealBook();}}).catch(()=>{});
     announcement.textContent = `${book.title || 'Book'} opened. ${normalized.chapters[pages[pageIndex]?.chapterIndex || 0].title}.`;
   }
 
   function close(notify = true) {
     if (!isOpen) return;
     clearTimeout(progressTimer);
+    cancelOpening();
     // Flush the last settled location; never save an unfinished drag.
     if (book && normalized?.totalWords) {
       try { onProgress(book.id, { wordOffset: anchorOffset, fraction: readingFraction() }); }
@@ -901,7 +1065,8 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     clearTimeout(resizeTimer);
     closePanels();
     root.hidden = true;
-    if (openedBodyLock) document.body.classList.remove('reader-open');
+    controls.unmount();
+    if (openedBodyLock) { document.body.classList.remove('reader-open'); document.documentElement.classList.remove('fr-reader-open'); }
     announcement.textContent = '';
     if (notify) {
       try { onClose(); } finally {
@@ -930,6 +1095,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     document.removeEventListener('keydown', onKeyDown);
     document.removeEventListener('focusin', onFocusIn);
     spreadInput.removeEventListener('change', onSpreadChange);
+    tapInput.removeEventListener('change', onTapToTurnChange);
     bookSearch.removeEventListener('input', searchBook);
     range.removeEventListener('input', onRangeInput);
     range.removeEventListener('change', onRangeChange);
@@ -937,5 +1103,5 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {} }
     root.replaceChildren();
   }
 
-  return { open, close, destroy };
+  return { open, close, destroy, get preview() { return previewOnly; } };
 }

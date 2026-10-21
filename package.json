@@ -5,9 +5,24 @@
   "type": "module",
   "description": "Folio ebook library and fluid reader with Firebase Authentication and Firestore",
   "scripts": {
-    "dev": "node scripts/serve.mjs",
+    "dev": "npm run build:controls && node scripts/serve.mjs",
+    "build:controls": "node scripts/build-controls.mjs",
     "build": "node scripts/build.mjs",
-    "check": "node scripts/check.mjs"
+    "check": "node scripts/check.mjs",
+    "check:navigation": "node --test tests/navigation.browser.test.mjs",
+    "check:reader": "node --test tests/reader-controls.browser.test.mjs",
+    "check:membership": "node --test tests/membership.browser.test.mjs",
+    "check:publishing": "node --test tests/publishing.browser.test.mjs"
   },
-  "engines": {"node": ">=20"}
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "liquid-gooey": "^0.2.2",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2"
+  }
 }

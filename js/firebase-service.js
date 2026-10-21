@@ -4,6 +4,10 @@ const CONFIG_URL = new URL('../firebase-config.json', import.meta.url);
 const MAX_WORD_OFFSET = 10_000_000;
 const MAX_TIMESTAMP = 4_102_444_800_000;
 const BOOK_ID = /^[a-z0-9][a-z0-9_-]{0,79}$/;
+const PUBLICATION_ID = /^b-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SHARE_TOKEN = /^[0-9a-f]{64}$/;
+const MAX_PUBLICATION_BYTES = 450_000;
+const COVER_KINDS = new Set(['shape', 'atlas', 'blue-hour', 'wild', 'slowly', 'tomorrow']);
 
 async function loadBrowserSdk() {
   const [app, auth, firestore] = await Promise.all([
@@ -20,6 +24,9 @@ const ERROR_MESSAGES = {
   'folio/invalid-input': 'Please check the information you entered and try again.',
   'folio/not-signed-in': 'Sign in to sync your library and reading position.',
   'folio/wrong-account': 'This library belongs to a different account. Please sign in again.',
+  'folio/share-not-found': 'This book link is unavailable. Ask the author for a new link.',
+  'folio/book-too-large': 'This book is too large. Use up to 50 chapters and 450 KB of text.',
+  'folio/invalid-book': 'Check the title, author, and chapter text before publishing.',
   'auth/invalid-email': 'Enter a valid email address.',
   'auth/missing-email': 'Enter your email address.',
   'auth/missing-password': 'Enter your password.',
@@ -107,6 +114,64 @@ function assertBookId(bookId) {
   if (typeof bookId !== 'string' || !BOOK_ID.test(bookId)) throw serviceError('folio/invalid-input');
 }
 
+function assertShare(bookId, shareToken) {
+  if (typeof bookId !== 'string' || !PUBLICATION_ID.test(bookId)
+    || typeof shareToken !== 'string' || !SHARE_TOKEN.test(shareToken)) throw serviceError('folio/share-not-found');
+}
+
+function publicationText(input, key, maximum, fallback = '') {
+  const value = input?.[key] ?? fallback;
+  if (typeof value !== 'string' || value.trim().length > maximum || /\u0000/.test(value)) throw serviceError('folio/invalid-book');
+  return value.trim();
+}
+
+/** Plain text only: published cover HTML is generated locally from the escaped title. */
+function cleanPublication(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw serviceError('folio/invalid-book');
+  const title = publicationText(input, 'title', 200);
+  const author = publicationText(input, 'author', 120);
+  if (!title || !author || !Array.isArray(input.chapters) || !input.chapters.length) throw serviceError('folio/invalid-book');
+  if (input.chapters.length > 50) throw serviceError('folio/book-too-large');
+  const chapters = input.chapters.map(chapter => {
+    const chapterTitle = publicationText(chapter, 'title', 200);
+    if (!chapterTitle || !Array.isArray(chapter.paragraphs) || !chapter.paragraphs.length || chapter.paragraphs.length > 2_000) {
+      throw serviceError('folio/invalid-book');
+    }
+    const paragraphs = chapter.paragraphs.map(paragraph => {
+      if (typeof paragraph !== 'string' || !paragraph.trim() || paragraph.length > 100_000 || /\u0000/.test(paragraph)) {
+        throw serviceError('folio/invalid-book');
+      }
+      return paragraph.trim();
+    });
+    return { title: chapterTitle, paragraphs };
+  });
+  const priceCents = input.priceCents ?? 499;
+  if (!Number.isInteger(priceCents) || priceCents < 99 || priceCents > 99_999) throw serviceError('folio/invalid-book');
+  const kind = input.kind ?? 'shape';
+  if (!COVER_KINDS.has(kind)) throw serviceError('folio/invalid-book');
+  const result = { title, author, genre: publicationText(input, 'genre', 80, 'Fiction'), kind,
+    kicker: publicationText(input, 'kicker', 80, 'An original story'),
+    description: publicationText(input, 'description', 3_000), category: publicationText(input, 'category', 80, 'Fiction'),
+    priceCents, chapters };
+  if (new TextEncoder().encode(JSON.stringify(result)).length > MAX_PUBLICATION_BYTES) throw serviceError('folio/book-too-large');
+  return result;
+}
+
+function publicationRecord(bookId, data) {
+  if (!PUBLICATION_ID.test(bookId) || data?.bookId !== bookId || typeof data.ownerUid !== 'string'
+    || !data.ownerUid || data.ownerUid.length > 128 || data.ownerUid.includes('/') || typeof data.contentJson !== 'string') {
+    throw serviceError('folio/share-not-found');
+  }
+  let chapters;
+  try { chapters = JSON.parse(data.contentJson); } catch { throw serviceError('folio/share-not-found'); }
+  let book;
+  try { book = cleanPublication({ ...data, chapters }); } catch { throw serviceError('folio/share-not-found'); }
+  const words = book.chapters.reduce((sum, chapter) => sum + chapter.paragraphs.join(' ').split(/\s+/u).length, 0);
+  const cover = book.title.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+  return { ...book, id: bookId, ownerUid: data.ownerUid, publishedAt: timestampMillis(data.publishedAt),
+    source: 'folio-publication', pages: Math.max(1, Math.ceil(words / 250)), cover };
+}
+
 function validatedConfig(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw serviceError('folio/invalid-config');
   const result = {};
@@ -128,6 +193,7 @@ export function createFirebaseService({
   configUrl = CONFIG_URL,
   now = Date.now,
   hostname = globalThis.location?.hostname || '',
+  cryptoImpl = globalThis.crypto,
 } = {}) {
   let initialization;
   let sdk;
@@ -303,7 +369,10 @@ export function createFirebaseService({
       if (closed) return;
       if (uid !== null) assertOwner(uid);
       detach = sdk.firestore.onSnapshot(makeQuery(), snapshot => {
-        if (!closed && (uid === null || currentUser?.uid === uid)) callback(transform(snapshot), null);
+        if (!closed && (uid === null || currentUser?.uid === uid)) {
+          try { callback(transform(snapshot), null); }
+          catch (error) { callback(null, mappedError(error)); stop(); }
+        }
       }, error => {
         if (!closed) { callback(null, mappedError(error)); stop(); }
       });
@@ -387,10 +456,132 @@ export function createFirebaseService({
 
   function watchCatalog(callback) { return watchQuery(null, catalogQuery, catalogRecords, callback); }
 
+  function shareDoc(bookId, shareToken) {
+    assertShare(bookId, shareToken);
+    return sdk.firestore.doc(db, 'folioCatalog', bookId, 'shares', shareToken);
+  }
+
+  function randomPublicationKeys() {
+    if (typeof cryptoImpl?.getRandomValues !== 'function') throw serviceError('folio/service-error', 'A secure connection is required to publish a book.');
+    const bytes = cryptoImpl.getRandomValues(new Uint8Array(48));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = [...bytes].map(byte => byte.toString(16).padStart(2, '0')).join('');
+    return { bookId: `b-${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`,
+      shareToken: hex.slice(32) };
+  }
+
+  /** Immutable author copy + a get-only capability. A link never exposes a catalog listing. */
+  async function publishBook(uid, input) {
+    try {
+      await requireReady();
+      assertOwner(uid);
+      const { chapters, ...metadata } = cleanPublication(input);
+      const { bookId, shareToken } = randomPublicationKeys();
+      const data = { bookId, ownerUid: uid, ...metadata, contentJson: JSON.stringify(chapters), publishedAt: sdk.firestore.serverTimestamp() };
+      const batch = sdk.firestore.writeBatch(db);
+      batch.set(userDoc(uid, 'publications', bookId), { ...data, shareToken });
+      batch.set(shareDoc(bookId, shareToken), data);
+      assertOwner(uid);
+      await batch.commit();
+      assertOwner(uid);
+      return { book: publicationRecord(bookId, { ...data, publishedAt: Math.trunc(now()) }), shareToken };
+    } catch (error) { throw mappedError(error); }
+  }
+
+  /** Public, exact-document retrieval; possession of the 256-bit token grants this book. */
+  async function getSharedBook(bookId, shareToken) {
+    try {
+      assertShare(bookId, shareToken);
+      await requireReady();
+      const snapshot = await sdk.firestore.getDoc(shareDoc(bookId, shareToken));
+      if (!snapshot.exists()) throw serviceError('folio/share-not-found');
+      return publicationRecord(bookId, snapshot.data());
+    } catch (error) { throw mappedError(error); }
+  }
+
+  function watchPublications(uid, callback) {
+    return watchQuery(uid, () => sdk.firestore.query(sdk.firestore.collection(db, 'folioUsers', uid, 'publications'),
+      sdk.firestore.orderBy('publishedAt', 'desc'), sdk.firestore.limit(200)),
+    snapshot => snapshot.docs.map(item => {
+      const data = item.data();
+      assertShare(item.id, data.shareToken);
+      if (data.ownerUid !== uid) throw serviceError('folio/share-not-found');
+      return { ...publicationRecord(item.id, data), shareToken: data.shareToken };
+    }), callback);
+  }
+
+  async function getPublicationShare(uid, bookId) {
+    try {
+      await requireReady();
+      if (!PUBLICATION_ID.test(bookId)) throw serviceError('folio/share-not-found');
+      const snapshot = await sdk.firestore.getDoc(userDoc(uid, 'publications', bookId));
+      assertOwner(uid);
+      if (!snapshot.exists()) throw serviceError('folio/share-not-found');
+      const data = snapshot.data();
+      assertShare(bookId, data.shareToken);
+      if (data.ownerUid !== uid) throw serviceError('folio/share-not-found');
+      return { book: publicationRecord(bookId, data), shareToken: data.shareToken };
+    } catch (error) { throw mappedError(error); }
+  }
+
+  /** A signed-in reader keeps the shared book across devices; repeated claims preserve ownership. */
+  async function claimSharedBook(uid, bookId, shareToken) {
+    try {
+      await requireReady();
+      assertOwner(uid);
+      const book = await getSharedBook(bookId, shareToken);
+      const ref = userDoc(uid, 'owned', bookId);
+      let retainedToken = shareToken;
+      await sdk.firestore.runTransaction(db, async transaction => {
+        const previous = await transaction.get(ref);
+        assertOwner(uid);
+        if (previous.exists()) {
+          const data = previous.data();
+          assertShare(bookId, data.shareToken);
+          if (data.bookId !== bookId || data.source !== 'shared') throw serviceError('folio/share-not-found');
+          retainedToken = data.shareToken;
+          return;
+        }
+        transaction.set(ref, { bookId, shareToken, source: 'shared', acquiredAt: sdk.firestore.serverTimestamp() });
+      });
+      assertOwner(uid);
+      return { ...(retainedToken === shareToken ? book : await getSharedBook(bookId, retainedToken)), shareToken: retainedToken };
+    } catch (error) { throw mappedError(error); }
+  }
+
+  function watchOwnedBooks(uid, callback) {
+    if (typeof callback !== 'function') throw new TypeError('A subscription requires a callback.');
+    let closed = false;
+    let sequence = 0;
+    const resolved = new Map();
+    const stopQuery = watchQuery(uid, () => sdk.firestore.query(sdk.firestore.collection(db, 'folioUsers', uid, 'owned'),
+      sdk.firestore.orderBy('acquiredAt', 'desc'), sdk.firestore.limit(500)), snapshot => snapshot.docs.map(item => ({ ...item.data(), id: item.id })), (records, error) => {
+      const revision = ++sequence;
+      if (closed) return;
+      if (error) { callback(null, error); return; }
+      if (currentUser?.uid !== uid) return;
+      void Promise.all(records.map(async record => {
+        assertShare(record.id, record.shareToken);
+        if (record.bookId !== record.id || record.source !== 'shared') throw serviceError('folio/share-not-found');
+        const key = `${record.id}/${record.shareToken}`;
+        if (!resolved.has(key)) resolved.set(key, getSharedBook(record.id, record.shareToken).catch(error => { resolved.delete(key); throw error; }));
+        return { ...await resolved.get(key), shareToken: record.shareToken, acquiredAt: timestampMillis(record.acquiredAt) };
+      })).then(books => {
+        if (!closed && revision === sequence && currentUser?.uid === uid) callback(books, null);
+      }).catch(error => {
+        if (!closed && revision === sequence && currentUser?.uid === uid) callback(null, mappedError(error));
+      });
+    });
+    return () => { closed = true; sequence += 1; resolved.clear(); stopQuery(); };
+  }
+
   return { initFirebase, subscribeAuth, signUp, signIn, signInWithGoogle, sendPasswordReset, signOut,
-    watchLibrary, watchReadingProgress, saveLibraryBook, removeLibraryBook, saveReadingProgress, getCatalog, watchCatalog };
+    watchLibrary, watchReadingProgress, saveLibraryBook, removeLibraryBook, saveReadingProgress, getCatalog, watchCatalog,
+    publishBook, getSharedBook, watchPublications, getPublicationShare, claimSharedBook, watchOwnedBooks };
 }
 
 const service = createFirebaseService();
 export const { initFirebase, subscribeAuth, signUp, signIn, signInWithGoogle, sendPasswordReset, signOut,
-  watchLibrary, watchReadingProgress, saveLibraryBook, removeLibraryBook, saveReadingProgress, getCatalog, watchCatalog } = service;
+  watchLibrary, watchReadingProgress, saveLibraryBook, removeLibraryBook, saveReadingProgress, getCatalog, watchCatalog,
+  publishBook, getSharedBook, watchPublications, getPublicationShare, claimSharedBook, watchOwnedBooks } = service;

@@ -1,4 +1,6 @@
 node_modules/
+js/reader-controls.js
+js/reader-controls.LICENSE.txt
 dist/
 qa/
 .firebase/

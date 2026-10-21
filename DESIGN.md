@@ -1,16 +1,11 @@
-# Folio — Tahoe / Golden Gate direction
+# Folio design implementation
 
-This branch is a working design preview, prepared for visual review before a new Hosting release.
+The interface follows the supplied **Xilo Folio Apple redesign** archive. Its home page establishes the sunset palette, white system typography, orange primary buttons, floating pill header, and six illustrated covers. Discover filters the catalog by Fiction, Ideas, or Escape. Collection cards lead to those filtered shelves.
 
-The floating Liquid Glass pill returns around the Folio header, with a translucent fill, fine rim, soft highlight, and rounded selected destination. It carries the lowercase wordmark, centered text navigation, search, and sign-in controls. On phones the pill stays a single compact row, while the three destinations remain in the labeled bottom tab bar. The glass sits in a decorative sibling so it cannot trap viewport-fixed phone navigation. System contrast and reduced-transparency settings use solid materials.
+Each book has a large cover, its own ambient color, edition details, a Want to Read action, and a paper excerpt with a Newsreader drop cap. The full reader uses framed pages over a blurred backdrop, theme swatches, text-size controls, and bottom page navigation. The existing continuous WebGL page mesh handles the page turns. The cover opening and pointer tilt honor reduced-motion preferences.
 
-The editorial feature and original Folio covers retain the identity of the original Gallery. A restrained Books-inspired orange marks the primary reading action and current navigation destination. The whole interface supports light and dark appearances. Footer content is reduced to a quiet single line on phones.
+The supplied prototype is a visual reference. The application retains its Firebase Authentication and Firestore adapters, separate guest/account caches, saved-book mutations, canonical word offsets, complete three-chapter stories, keyboard navigation, and WebGL fallbacks. Prototype sign-in placeholders connect to the real account dialog; Want to Read connects to the real saved library. Catalog search and the saved library remain accessible from the footer, and the library invitation opens the guest library.
 
-Search, guest saves, account dialogs, Firebase integration, reading positions, and page-turn gestures remain part of the working app. This is a web interpretation of Apple's design language, without imitation operating-system window buttons or invented product features.
+Newsreader is hosted locally with its SIL Open Font License. There is no prototype runtime or third-party UI framework in the production build. Small screens adapt the header, filters, shelves, and reader controls to preserve accessible navigation and prevent horizontal overflow.
 
-References:
-- https://www.apple.com/os/macos/ — Golden Gate design refinements: toolbars, sidebars, contrast, readability.
-- https://developer.apple.com/design/human-interface-guidelines/sidebars — adaptive navigation.
-- https://developer.apple.com/videos/play/wwdc2025/219/ — material hierarchy.
-
-The reader uses a continuous 24,576-triangle paper mesh, smooth interpolated lighting, and cached high-resolution page textures. Drag direction follows the gesture, including swipes that start near the opposite edge. Release carries measured input velocity into a critically damped settle; unfinished or cancelled pulls never advance the saved reading position. Reduced motion avoids the 3D turn, and a flat slide keeps reading usable without WebGL.
+Changes are developed on `design/claude-redesign`. Firebase Hosting remains the deployment destination in project `xilo-web-systems`, target `folio`, site `xilo-folio`. The shared project's authentication settings, Firestore data, and policies remain outside this UI change.
