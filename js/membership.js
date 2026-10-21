@@ -30,8 +30,19 @@ const validTime = value => Number.isSafeInteger(value)&&value>=0&&value<=4102444
 const cancelled = () => new DOMException('Checkout cancelled.','AbortError');
 const requireActive = signal => {if(signal?.aborted)throw cancelled();};
 const receiptId = () => 'FOLIO-'+(globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+const unavailable = () => Object.assign(new Error('Payment processor cannot be reached.'),{code:'payment/unavailable'});
+function pause(ms,signal){
+ return new Promise((resolve,reject)=>{
+  if(signal?.aborted){reject(cancelled());return;}
+  const abort=()=>{clearTimeout(timer);reject(cancelled());};
+  const timer=setTimeout(()=>{signal?.removeEventListener('abort',abort);resolve();},Math.max(0,ms));
+  signal?.addEventListener('abort',abort,{once:true});
+ });
+}
+// No payment provider is configured for this site, so the gateway connection times out.
+export const unreachableProcessor = ({timeout=3200}={}) => async({signal}={}) => {await pause(timeout,signal);throw unavailable();};
 
-export function createMembershipService({storage,now=Date.now,delay=900,processor=async()=>({approved:true})}={}){
+export function createMembershipService({storage,now=Date.now,delay=900,processor=unreachableProcessor()}={}){
  const storageApi=()=>storage || globalThis.localStorage;
  function read(uid){
   try{
@@ -73,11 +84,7 @@ export function createMembershipService({storage,now=Date.now,delay=900,processo
  }
  async function authorize(request,signal){
   requireActive(signal);
-  await new Promise((resolve,reject)=>{
-   const abort=()=>{clearTimeout(timer);reject(cancelled());};
-   const timer=setTimeout(()=>{signal?.removeEventListener('abort',abort);resolve();},Math.max(0,delay));
-   signal?.addEventListener('abort',abort,{once:true});
-  });
+  await pause(delay,signal);
   requireActive(signal);
   let result;
   try{
@@ -92,6 +99,7 @@ export function createMembershipService({storage,now=Date.now,delay=900,processo
   }
   catch(error){
    if(signal?.aborted||error?.name==='AbortError')throw cancelled();
+   if(error?.code==='payment/unavailable')throw unavailable();
    throw Object.assign(new Error('We couldn’t complete checkout. Please try again.'),{code:'payment/failed'});
   }
   requireActive(signal);

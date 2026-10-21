@@ -9,13 +9,15 @@ const quiet=books.find(book=>book.id==='quiet'),limit=previewLimit(quiet);
 const guestMembershipKey=membershipKey();
 const continueCheckout=modal=>modal.locator('[data-membership-action="checkout"]').click();
 const confirmPayment=modal=>modal.locator('[data-membership-action="pay"]').click();
+const unreachable='Payment processor cannot be reached.';
+const seedAccess=(page,key,record)=>page.evaluate(([key,record])=>{localStorage.setItem(key,JSON.stringify({...record,startedAt:Date.now(),expiresAt:Date.now()+86400000}));dispatchEvent(new StorageEvent('storage',{key,storageArea:localStorage}));},[key,record]);
 async function assertCustomerCopy(scope){
  assert.doesNotMatch(await scope.innerText(),/\bdemo\b|\bmock\b|test mode|payment result|choose approved/i,'customer UI has no processor testing controls or terminology');
  assert.equal(await scope.locator('[name="payment-result"]').count(),0,'payment outcomes are not a customer control');
 }
 const settle=page=>page.waitForFunction(()=>!document.querySelector('#main-content').dataset.navigation);
 const menu=async page=>{await page.locator('.fr-menu-toggle').click();await page.waitForTimeout(60)};
-test('account, preview boundary, and mock checkout form one complete reading journey',async t=>{
+test('account, preview boundary, and checkout form one complete reading journey',async t=>{
  const useWebkit=process.env.FOLIO_BROWSER_ENGINE==='webkit',bundle=process.env.FOLIO_WEBKIT_BUNDLE;
  const browser=useWebkit?await webkit.launch({headless:true,...(bundle?{executablePath:bundle+'/bin/MiniBrowser',env:{...process.env,WEBKIT_EXEC_PATH:bundle+'/bin',WEBKIT_INJECTED_BUNDLE_PATH:bundle+'/lib',WEBKIT_INSPECTOR_RESOURCES_PATH:bundle+'/share'}}:{})}):await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.BROWSER_EXECUTABLE?{executablePath:process.env.BROWSER_EXECUTABLE}:{})});
  try{
@@ -49,25 +51,21 @@ test('account, preview boundary, and mock checkout form one complete reading jou
    await continueCheckout(modal);
    assert.match(await modal.locator('.checkout-summary').textContent(),/59.99/);
    await assertCustomerCopy(modal);
-   await page.evaluate(key=>{
-    const original=Storage.prototype.setItem;
-    window.restorePaymentStorage=()=>{Storage.prototype.setItem=original;delete window.restorePaymentStorage;};
-    Storage.prototype.setItem=function(name,value){if(name===key)throw new DOMException('Storage is unavailable.','QuotaExceededError');return original.call(this,name,value);};
-   },guestMembershipKey);
+   const pay=modal.locator('[data-membership-action="pay"]');
    await confirmPayment(modal);
-   await modal.getByRole('alert').waitFor();
+   assert.ok(await pay.isDisabled(),'the confirm button shows progress while the processor connects');
+   assert.equal(await modal.locator('.membership-content').getAttribute('aria-busy'),'true');
+   const alert=modal.getByRole('alert');await alert.waitFor({timeout:10000});
+   assert.equal((await alert.textContent()).trim(),unreachable);
    await assertCustomerCopy(modal);
-   assert.equal(await page.evaluate(key=>localStorage.getItem(key),guestMembershipKey),null,'a failed checkout grants nothing');
-   await page.evaluate(()=>window.restorePaymentStorage());
-   await confirmPayment(modal);
-   await modal.locator('[data-step="success"]').waitFor();
-   await assertCustomerCopy(modal);
-   await modal.getByRole('button',{name:'Continue reading'}).click();
-   await modal.waitFor({state:'hidden'});
-   await page.waitForFunction(limit=>Number(document.querySelector('.fr-progress-range').value)>=limit,limit);
-   assert.equal(await page.locator('.fr-locked-chapter').count(),0);
+   assert.equal(await page.evaluate(key=>localStorage.getItem(key),guestMembershipKey),null,'an unreachable processor grants nothing');
+   assert.ok(await pay.isEnabled(),'checkout can be tried again');
+   await page.keyboard.press('Escape');await modal.waitFor({state:'hidden'});
+   assert.equal(await page.locator('.fr-locked-chapter').count(),quiet.chapters.length-1,'the preview stays in place');
+   // Access already held on this device still unlocks every chapter and its account controls.
+   await seedAccess(page,guestMembershipKey,{version:1,planId:'annual',renew:true,receiptId:'FOLIO-annual'});
+   await page.waitForFunction(()=>!document.querySelector('.fr-locked-chapter'));
    assert.equal(await page.locator('.fr-progress-range').getAttribute('max'),String(quiet.chapters.flatMap(c=>c.paragraphs).join(' ').trim().split(/\s+/u).length-1));
-   assert.ok(await page.locator('.fr-chapter-heading').textContent().then(value=>value===quiet.chapters[1].title),'approval resumes at the next chapter');
    await page.reload();await page.locator('.fr-book[aria-busy="false"]').waitFor();assert.equal(await page.locator('.fr-locked-chapter').count(),0,'access survives reload');
    await page.keyboard.press('Escape');await page.locator('.account-button').click();await settle(page);
    assert.match(await page.locator('.membership-details').textContent(),/Annual plan/);
@@ -101,20 +99,18 @@ test('account, preview boundary, and mock checkout form one complete reading jou
    `}));
    const page=await context.newPage(),errors=[];page.on('pageerror',e=>errors.push(e.message));
    await page.goto(base+'#account');await page.locator('.profile-view').waitFor();
+   await seedAccess(page,membershipKey('reader-a'),{version:1,planId:'monthly',renew:true,receiptId:'FOLIO-reader-a'});
    await page.evaluate(()=>window.folioTestAuth({uid:'reader-a',email:'a@example.test',displayName:'A Reader'}));
    assert.equal(await page.locator('#profile-name').textContent(),'A Reader');
-   await page.getByRole('button',{name:/Explore Folio Plus/}).click();
-   const modal=page.locator('#membership-dialog');await continueCheckout(modal);
-   await confirmPayment(modal);await modal.locator('[data-step="success"]').waitFor();
-   await modal.getByRole('button',{name:/Go to your account/}).click();
    assert.ok(await page.locator('.membership-details').isVisible());
+   const modal=page.locator('#membership-dialog');
    await page.evaluate(()=>window.folioTestAuth({uid:'reader-b',email:'b@example.test',displayName:'B Reader'}));
    assert.equal(await page.locator('#profile-name').textContent(),'B Reader');
    assert.equal(await page.locator('.membership-details').count(),0,'another account cannot inherit access');
    await page.getByRole('button',{name:/Explore Folio Plus/}).click();await continueCheckout(modal);
    await confirmPayment(modal);
    await page.evaluate(()=>window.folioTestAuth({uid:'reader-c',email:'c@example.test',displayName:'C <Reader>'}));
-   await modal.waitFor({state:'hidden'});await page.waitForTimeout(1100);
+   await modal.waitFor({state:'hidden'});await page.waitForTimeout(4500);
    assert.equal(await page.locator('#profile-name').textContent(),'C <Reader>');
    assert.equal(await page.evaluate(key=>localStorage.getItem(key),membershipKey('reader-b')),null,'switching identity cancels pending approval');
    assert.equal(await page.locator('.membership-details').count(),0);
@@ -128,7 +124,7 @@ test('account, preview boundary, and mock checkout form one complete reading jou
    assert.equal(await page.locator('.membership-details').count(),0,'a guest cannot inherit signed-in access');
    assert.deepEqual(errors,[]);await context.close();
   });
-  await t.test('buying one book persists ownership without unlocking the rest of the collection',async()=>{
+  await t.test('buying a book reports an unreachable processor, and an owned book unlocks only itself',async()=>{
    const context=await browser.newContext({viewport:{width:390,height:844},hasTouch:true,isMobile:true,reducedMotion:'reduce'});
    await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
    const page=await context.newPage();await page.goto(base+'#book/quiet');
@@ -137,15 +133,16 @@ test('account, preview boundary, and mock checkout form one complete reading jou
    if(await modal.locator('[data-membership-action="buy"]').isVisible())await modal.locator('[data-membership-action="buy"]').click();
    await modal.locator('[data-step="checkout"]').waitFor();
    assert.match(await modal.locator('.checkout-summary').textContent(),/4\.99/);
-   await assertCustomerCopy(modal);await confirmPayment(modal);await modal.locator('[data-step="success"]').waitFor();
-   await assertCustomerCopy(modal);await modal.locator('[data-step="success"] [data-membership-action="close"]').click();
-   await modal.waitFor({state:'hidden'});
-   const owned=await page.evaluate(key=>JSON.parse(localStorage.getItem(key)),ownershipKey());
-   assert.equal(owned.books.filter(book=>book.bookId==='quiet'&&book.source==='purchase').length,1);
-   assert.equal(await page.evaluate(key=>localStorage.getItem(key),guestMembershipKey),null,'a single purchase does not create a subscription');
-   await page.goto(base+'#read/quiet');await page.locator('.fr-book[aria-busy="false"]').waitFor();
-   assert.equal(await page.locator('.fr-locked-chapter').count(),0);
-   await page.reload();await page.locator('.fr-book[aria-busy="false"]').waitFor();
+   await assertCustomerCopy(modal);await confirmPayment(modal);
+   const alert=modal.getByRole('alert');await alert.waitFor({timeout:10000});
+   assert.equal((await alert.textContent()).trim(),unreachable);await assertCustomerCopy(modal);
+   assert.equal(await page.evaluate(key=>localStorage.getItem(key),ownershipKey()),null,'an unreachable processor grants no ownership');
+   assert.equal(await page.evaluate(key=>localStorage.getItem(key),guestMembershipKey),null);
+   await page.keyboard.press('Escape');await modal.waitFor({state:'hidden'});
+   assert.ok(await page.getByRole('button',{name:/^Buy this book/i}).isVisible(),'the book can still be bought later');
+   // A purchase recorded on this device earlier keeps that book, and only that book, unlocked.
+   await page.evaluate(key=>localStorage.setItem(key,JSON.stringify({version:1,books:[{bookId:'quiet',source:'purchase',acquiredAt:Date.now(),amountCents:499,receiptId:'FOLIO-quiet'}]})),ownershipKey());
+   await page.goto(base+'#read/quiet');await page.reload();await page.locator('.fr-book[aria-busy="false"]').waitFor();
    assert.equal(await page.locator('.fr-locked-chapter').count(),0,'purchased ownership survives refresh');
    await page.goto(base+'#read/blue');await page.locator('.fr-book[aria-busy="false"]').waitFor();
    assert.ok(await page.locator('.fr-locked-chapter').count()>0,'other books remain previews');

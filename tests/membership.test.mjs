@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createMembershipService,membershipKey,ownershipKey,bookPrice,previewLimit,PLANS} from '../js/membership.js';
+import {createMembershipService,unreachableProcessor,membershipKey,ownershipKey,bookPrice,previewLimit,PLANS} from '../js/membership.js';
+const approve=async()=>({approved:true});
 function harness(time=Date.UTC(2026,0,31),options={}){
  const data=new Map();let clock=time;
- const service=createMembershipService({storage:{getItem:key=>data.get(key)||null,setItem:(key,value)=>data.set(key,value)},now:()=>clock,delay:1,...options});
+ const service=createMembershipService({storage:{getItem:key=>data.get(key)||null,setItem:(key,value)=>data.set(key,value)},now:()=>clock,delay:1,processor:approve,...options});
  return {service,data,advance:ms=>clock+=ms};
 }
 test('a preview includes exactly Chapter One words',()=>{
@@ -30,6 +31,20 @@ test('leaving checkout before approval never grants access',async()=>{
  await assert.rejects(result,{name:'AbortError'});assert.equal(data.size,0);
  await assert.rejects(service.checkout({planId:'monthly',signal:controller.signal}),{name:'AbortError'});assert.equal(data.size,0);
 });
+test('an unreachable payment processor fails checkout and purchases without granting access',async()=>{
+ const {service,data}=harness(undefined,{processor:unreachableProcessor({timeout:5})});
+ await assert.rejects(service.checkout({uid:'a',planId:'monthly'}),{code:'payment/unavailable',message:'Payment processor cannot be reached.'});
+ await assert.rejects(service.purchaseBook({uid:'a',book:{id:'quiet'}}),{code:'payment/unavailable',message:'Payment processor cannot be reached.'});
+ assert.equal(data.size,0);assert.equal(service.read('a'),null);assert.equal(service.ownsBook('a','quiet'),false);
+ const controller=new AbortController(),pending=service.checkout({uid:'a',planId:'annual',signal:controller.signal});
+ setTimeout(()=>controller.abort(),3);await assert.rejects(pending,{name:'AbortError'});assert.equal(data.size,0);
+});
+test('by default checkout waits for the processor, then reports it cannot be reached',async()=>{
+ const data=new Map(),service=createMembershipService({storage:{getItem:key=>data.get(key)||null,setItem:(key,value)=>data.set(key,value)},delay:1});
+ const started=Date.now();
+ await assert.rejects(service.checkout({planId:'monthly'}),{code:'payment/unavailable',message:'Payment processor cannot be reached.'});
+ assert.ok(Date.now()-started>=3000,'the connection attempt takes a few seconds');assert.equal(data.size,0);
+});
 test('cancelled renewal retains access until expiry, can resume, and does not affect another owner',async()=>{
  const {service,advance}=harness();const first=await service.checkout({uid:'a',planId:'annual'});
  await service.checkout({uid:'b',planId:'monthly'});
@@ -45,7 +60,7 @@ test('malformed records and unknown plans never enable access',async()=>{
  await assert.rejects(service.checkout({planId:'constructor'}),/Choose/);
 });
 test('a blocked storage write fails checkout instead of pretending to activate access',async()=>{
- const service=createMembershipService({storage:{getItem:()=>null,setItem:()=>{throw Error('blocked')}},delay:1});
+ const service=createMembershipService({storage:{getItem:()=>null,setItem:()=>{throw Error('blocked')}},delay:1,processor:approve});
  await assert.rejects(service.checkout({planId:'monthly'}),/couldn’t save/);assert.equal(service.read(),null);
 });
 test('previous subscriptions remain active and are upgraded when managed',()=>{
@@ -85,7 +100,7 @@ test('failed or cancelled book checkout grants no ownership',async()=>{
  const controller=new AbortController(),pending=service.purchaseBook({uid:'a',book:{id:'quiet'},signal:controller.signal});controller.abort();
  await assert.rejects(pending,{name:'AbortError'});assert.equal(data.size,0);
  await assert.rejects(service.purchaseBook({uid:'a',book:{id:''}}),/Choose a book/);
- const blocked=createMembershipService({storage:{getItem:()=>null,setItem:()=>{throw Error('blocked')}},delay:1});
+ const blocked=createMembershipService({storage:{getItem:()=>null,setItem:()=>{throw Error('blocked')}},delay:1,processor:approve});
  await assert.rejects(blocked.purchaseBook({book:{id:'quiet'}}),/couldn’t save/);assert.equal(blocked.ownsBook(null,'quiet'),false);
  assert.throws(()=>blocked.grantSharedBook(null,'quiet'),/couldn’t save/);
 });
