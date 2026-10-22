@@ -14,12 +14,12 @@ function fakeIndexedDB({quota=Infinity,refuse=false,stall=false}={}){
   const objectStore={get:key=>request(()=>structuredClone(staged.get(key))),put:(value,key)=>request(()=>{staged.set(key,structuredClone(value));return key;}),delete:key=>request(()=>{staged.delete(key);}),clear:()=>request(()=>{staged.clear();})};
   tx.objectStore=()=>objectStore;
   setTimeout(()=>{
-   for(const item of requests)item.result=item.apply();
+   // Like IndexedDB, a success callback may place further requests in the same transaction.
+   for(let index=0;index<requests.length;index++){const item=requests[index];item.result=item.apply();item.onsuccess?.();}
    const others=[...stores].filter(([key])=>key!==name).reduce((total,[,values])=>total+[...values.values()].reduce((sum,value)=>sum+JSON.stringify(value).length,0),0);
    const size=others+[...staged.values()].reduce((sum,value)=>sum+JSON.stringify(value).length,0);
    if(size>quota){tx.error=new DOMException('The quota has been exceeded.','QuotaExceededError');tx.onabort?.();return;}
    stores.set(name,staged);
-   for(const item of requests)item.onsuccess?.();
    tx.oncomplete?.();
   });
   return tx;
@@ -76,6 +76,29 @@ test('a full device forgets other cached books, never drafts, and never throws',
  assert.equal((await createBookStore({indexedDB}).getDraft('user.a')).manuscript[0],'x','the last saved draft is untouched');
  assert.equal(await store.putDraft('user.a',{manuscript:'z'}),true);
  assert.equal((await store.getDraft('user.a')).manuscript,'z','a later save replaces the unsaved copy');
+});
+
+test('a full device forgets cached books to keep a draft, which cannot be downloaded again',async()=>{
+ const indexedDB=fakeIndexedDB({quota:900}),store=createBookStore({indexedDB});
+ assert.equal(await store.putContent('b-1',edition(1,'a'.repeat(500))),true);
+ assert.equal(await store.putDraft('user.a',{manuscript:'x'.repeat(500)}),true,'the draft makes room');
+ assert.equal((await createBookStore({indexedDB}).getDraft('user.a')).manuscript.length,500,'it is kept on this device');
+ assert.equal(await createBookStore({indexedDB}).getContent('b-1'),null,'the cached book was forgotten');
+ assert.equal(await store.putDraft('user.a',{manuscript:'y'.repeat(2000)}),false,'a draft that cannot fit at all still reports false');
+ assert.equal((await store.getDraft('user.a')).manuscript[0],'y');
+});
+
+test('a draft is deleted only while it still holds what the caller expects',async()=>{
+ const indexedDB=fakeIndexedDB(),store=createBookStore({indexedDB});
+ await store.putDraft('user.a',{title:'Another tab',manuscript:'Theirs.'});
+ assert.equal(await store.deleteDraftIf('user.a',draft=>draft.title==='This tab'),false);
+ assert.equal((await createBookStore({indexedDB}).getDraft('user.a')).title,'Another tab','a draft saved elsewhere is kept');
+ assert.equal(await store.deleteDraftIf('user.a',draft=>draft.title==='Another tab'),true);
+ assert.equal(await createBookStore({indexedDB}).getDraft('user.a'),null);
+ assert.equal(await store.deleteDraftIf('user.a',()=>true),false,'nothing to delete');
+ const memoryOnly=createBookStore({indexedDB:undefined});await memoryOnly.putDraft('guest',{title:'Kept'});
+ assert.equal(await memoryOnly.deleteDraftIf('guest',draft=>draft.title==='Other'),false);assert.equal((await memoryOnly.getDraft('guest')).title,'Kept');
+ assert.equal(await memoryOnly.deleteDraftIf('guest',draft=>draft.title==='Kept'),false,'only memory held it, so nothing was stored');assert.equal(await memoryOnly.getDraft('guest'),null);
 });
 
 test('malformed records and inputs are refused',async()=>{

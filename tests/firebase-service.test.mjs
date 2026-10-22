@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createFirebaseService, mergeReadingProgress, splitPublicationContent } from '../js/firebase-service.js';
 import { MAX_BOOK_BYTES, PART_BYTES, MAX_PARTS, MAX_CHAPTERS, MAX_PARAGRAPHS_PER_CHAPTER, MAX_PARAGRAPH_CHARS } from '../js/publication-limits.js';
 import { addPublicationRules, replacePublicationRules, blockSha256, main as prepareRules } from '../scripts/prepare-publication-rules.mjs';
+import { planBindings } from '../scripts/bind-publications.mjs';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -86,6 +87,8 @@ function harness({ user = { uid: 'user-a', displayName: 'Reader' }, status = 200
         return result;
       },
       deleteDoc: async ref => { docs.delete(ref.path); calls.writes += 1; },
+      // Like a rule that allows creates only: writing over an existing document is refused.
+      setDoc: async (ref, data) => { if (docs.has(ref.path)) throw Object.assign(new Error('Missing or insufficient permissions.'), { code: 'permission-denied' }); commitWrites([{ type: 'set', ref, data }]); },
       onSnapshot: (query, next, error) => { const watcher = { query, next, error, closed: false }; watches.push(watcher); return () => { watcher.closed = true; calls.detached += 1; }; },
       getDocs: async query => { calls.queries.push(query); return { docs: [] }; },
     },
@@ -335,7 +338,8 @@ test('publication writes both heads and the manuscript parts in one batch, with 
   assert.deepEqual({ revision: book.revision, chapterCount: book.chapterCount, wordCount: book.wordCount, pages: book.pages, contentBytes: book.contentBytes },
     { revision: 1, chapterCount: 2, wordCount: 12, pages: 1, contentBytes: utf8Bytes(json) });
   assert.equal(calls.batches, 1);
-  assert.equal(calls.writes, 3);
+  assert.equal(calls.writes, 4);
+  assert.deepEqual(docs.get(`folioCatalog/${book.id}/binding/owner`), { ownerUid: 'user-a', shareToken }, 'The first link binds the book ID in the same batch.');
   assert.equal(docs.has(`folioCatalog/${book.id}`), false, 'Link books never enter the global catalog.');
   const privateCopy = docs.get(authorPath('user-a', book.id));
   const sharedCopy = docs.get(headPath(book.id, shareToken));
@@ -527,6 +531,36 @@ test('signed ownership reload resolves book metadata and suppresses late snapsho
   assert.equal(received.length, 1, 'An old account cannot deliver resolved book content to the next account.');
 });
 
+test('owned books follow the author\'s edits: each snapshot reads the heads again, and an older read never wins', async () => {
+  const { service, docs, watches, changeUser, sdk } = harness();
+  const first = await service.publishBook('user-a', publicationInput());
+  const second = await service.publishBook('user-a', { ...publicationInput(), title: 'Second book' });
+  changeUser({ uid: 'recipient' });
+  await service.claimSharedBook('recipient', first.book.id, first.shareToken);
+  const received = [];
+  service.watchOwnedBooks('recipient', (books, error) => { assert.equal(error, null); received.push(books.map(book => `${book.title}@${book.revision}`)); });
+  await tick();
+  const record = id => ({ id, data: () => docs.get(`folioUsers/recipient/owned/${id}`) });
+  watches[0].next({ docs: [record(first.book.id)] });
+  await tick();
+  // The author saves a new edition on another device.
+  const firstHead = headPath(first.book.id, first.shareToken);
+  docs.set(firstHead, { ...docs.get(firstHead), title: 'Edited title', revision: 2 });
+  await service.claimSharedBook('recipient', second.book.id, second.shareToken);
+  watches.at(-1).next({ docs: [record(second.book.id), record(first.book.id)] });
+  await tick();
+  assert.deepEqual(received, [['The Coast & <Quiet>@1'], ['Second book@1', 'Edited title@2']]);
+  // A read that started before the edit and finishes after a newer one is ignored.
+  const getDoc = sdk.firestore.getDoc;
+  let release;
+  sdk.firestore.getDoc = async ref => ref.path.includes(first.book.id) ? new Promise(resolve => { release = () => resolve({ exists: () => true, data: () => ({ ...docs.get(ref.path), title: 'Stale title', revision: 1 }) }); }) : getDoc(ref);
+  watches.at(-1).next({ docs: [record(first.book.id)] });
+  await tick();
+  release();
+  await tick();
+  assert.deepEqual(received.at(-1), ['Edited title@2']);
+});
+
 test('failed publishing and retrieval never leave partial ownership, and each new link uses independent random keys', async () => {
   const { service, sdk, docs, calls } = harness();
   const first = await service.publishBook('user-a', publicationInput());
@@ -538,7 +572,7 @@ test('failed publishing and retrieval never leave partial ownership, and each ne
   sdk.firestore.writeBatch = () => ({ set() {}, commit: async () => { throw Object.assign(new Error('Offline'), { code: 'unavailable' }); } });
   await assert.rejects(service.publishBook('user-a', publicationInput()), { code: 'unavailable' });
   assert.equal(calls.writes, writes);
-  assert.equal(docs.size, 6);
+  assert.equal(docs.size, 8, 'Two books: two heads, one part and one binding each.');
   sdk.firestore.writeBatch = writeBatch;
   const sharedPath = headPath(first.book.id, first.shareToken);
   docs.set(sharedPath, { ...docs.get(sharedPath), partCount: MAX_PARTS + 1 });
@@ -606,7 +640,7 @@ test('an edit from an out-of-date copy is an edit conflict, never a silent overw
   await service.updateBook('user-a', book.id, { ...publicationInput(), title: 'Tab A' }, { expectedRevision: 1 });
   const writes = calls.writes;
   await assert.rejects(service.updateBook('user-a', book.id, { ...publicationInput(), title: 'Tab B' }, { expectedRevision: 1 }),
-    { code: 'folio/edit-conflict', message: 'This book was changed somewhere else. Reopen it to get the latest edition, then make your changes again.' });
+    { code: 'folio/edit-conflict', message: 'This book was changed somewhere else, so your changes weren’t saved yet. Load the latest edition to keep them on top of it.' });
   assert.equal(calls.writes, writes);
   assert.equal(docs.get(headPath(book.id, shareToken)).title, 'Tab A');
 
@@ -660,8 +694,16 @@ test('legacy inline books stay readable as revision 0 and move to parts on their
     assert.deepEqual({ revision: docs.get(stored).revision, partCount: docs.get(stored).partCount, title: docs.get(stored).title }, { revision: 1, partCount: 1, title: 'An Older Book, Revised' });
   }
   assert.deepEqual(calls.deletes, [1, 2, 3, 4, 5].map(index => partPath(LEGACY_ID, LEGACY_TOKEN, index)));
+  assert.deepEqual(docs.get(`folioCatalog/${LEGACY_ID}/binding/owner`), { ownerUid: 'user-a', shareToken: LEGACY_TOKEN }, 'The migrating edit binds the book ID.');
   assert.deepEqual((await service.getBookContent(LEGACY_ID, LEGACY_TOKEN)).chapters, publicationInput().chapters);
   assert.equal((await service.updateBook('user-a', LEGACY_ID, publicationInput(), { expectedRevision: 1 })).book.revision, 2);
+});
+
+test('a legacy book already bound elsewhere still saves its migrating edit', async () => {
+  const { service, docs } = harness();
+  seedLegacyBook(docs);
+  docs.set(`folioCatalog/${LEGACY_ID}/binding/owner`, { ownerUid: 'user-a', shareToken: LEGACY_TOKEN });
+  assert.equal((await service.updateBook('user-a', LEGACY_ID, publicationInput(), { expectedRevision: 0 })).book.revision, 1);
 });
 
 test('content reads retry until the head and every part share one revision', async () => {
@@ -728,6 +770,26 @@ test('rule replacement swaps only the reviewed Folio block and preserves every o
   assert.ok(Buffer.from(kept).subarray(0, Buffer.byteLength(unicode.slice(0, unicode.indexOf(RULES_BEGIN)))).equals(Buffer.from(unicode.slice(0, unicode.indexOf(RULES_BEGIN)))));
 });
 
+test('rule preparation follows the active policy\'s line endings whatever the repository checkout uses', async () => {
+  const lf = await readFile(new URL('../firestore.rules', import.meta.url), 'utf8');
+  const crlfCheckout = lf.replaceAll('\r\n', '\n').replaceAll('\n', '\r\n');
+  const additive = "rules_version = '2';\nservice cloud.firestore {\n  match /databases/{database}/documents {\n    match /anotherApp/{id} { allow read: if true; }\n  }\n}\n";
+  const endings = text => ({ crcrlf: text.includes('\r\r\n'), crlf: (text.match(/\r\n/g) || []).length, lf: (text.match(/(?<!\r)\n/g) || []).length });
+  for (const folio of [lf, crlfCheckout]) {
+    for (const newline of ['\n', '\r\n']) {
+      const replaced = replacePublicationRules(sharedPolicy(deployedBlock, newline), folio, blockSha256(deployedBlock));
+      const added = addPublicationRules(additive.replaceAll('\n', newline), folio).merged;
+      for (const merged of [replaced.merged, added]) {
+        const counts = endings(merged);
+        assert.equal(counts.crcrlf, false);
+        assert.equal(newline === '\n' ? counts.crlf : counts.lf, 0, 'one line-ending style throughout');
+      }
+      assert.equal(replaced.lineEndings, newline === '\n' ? 'lf' : 'crlf');
+      assert.equal(replaced.newSha256, blockSha256(repositoryBlock(lf)));
+    }
+  }
+});
+
 test('rule replacement refuses hand edits, marker anomalies, mixed line endings, and name collisions', async () => {
   const folio = await readFile(new URL('../firestore.rules', import.meta.url), 'utf8');
   const reviewed = blockSha256(deployedBlock);
@@ -778,4 +840,27 @@ test('rules preparation requires a reviewed hash to replace and never overwrites
     console.log = log;
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test('the binding backfill binds each consistent published book to its author and skips anything doubtful', () => {
+  const id = n => `b-0000000${n}-0000-4000-8000-000000000000`;
+  const token = c => c.repeat(64);
+  const heads = new Map([[`${id(1)}/${token('a')}`, { ownerUid: 'user-a' }], [`${id(2)}/${token('b')}`, { ownerUid: 'user-b' }],
+    [`${id(3)}/${token('c')}`, { ownerUid: 'someone-else' }], [`${id(5)}/${token('e')}`, { ownerUid: 'user-a' }], [`${id(5)}/${token('f')}`, { ownerUid: 'user-b' }]]);
+  const { bindings, skipped } = planBindings([
+    { uid: 'user-a', bookId: id(1), data: { ownerUid: 'user-a', shareToken: token('a') } },
+    { uid: 'user-b', bookId: id(2), data: { ownerUid: 'user-b', shareToken: token('b') } },
+    { uid: 'user-c', bookId: id(3), data: { ownerUid: 'user-c', shareToken: token('c') } },
+    { uid: 'user-d', bookId: id(4), data: { ownerUid: 'user-d', shareToken: token('d') } },
+    { uid: 'user-a', bookId: id(5), data: { ownerUid: 'user-a', shareToken: token('e') } },
+    { uid: 'user-b', bookId: id(5), data: { ownerUid: 'user-b', shareToken: token('f') } },
+    { uid: 'user-a', bookId: 'quiet', data: { ownerUid: 'user-a', shareToken: token('a') } },
+    { uid: 'user-a', bookId: id(6), data: { ownerUid: 'user-z', shareToken: token('a') } },
+  ], (bookId, shareToken) => heads.get(`${bookId}/${shareToken}`));
+  assert.deepEqual(bindings, [
+    { path: `folioCatalog/${id(1)}/binding/owner`, data: { ownerUid: 'user-a', shareToken: token('a') } },
+    { path: `folioCatalog/${id(2)}/binding/owner`, data: { ownerUid: 'user-b', shareToken: token('b') } },
+  ]);
+  assert.deepEqual(skipped.map(item => item.bookId), [id(3), id(4), id(5), 'quiet', id(6), id(5)]);
+  assert.deepEqual(skipped.filter(item => item.bookId === id(5)).map(item => item.uid).sort(), ['user-a', 'user-b'], 'every claimant of a contested ID is reported');
 });

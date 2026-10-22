@@ -21,12 +21,16 @@ async function capture(page,name){if(!process.env.FOLIO_QA_SCREENSHOTS)return;aw
 // cloud reads and claims across devices rather than copying localStorage.
 // Like the service, every read except getBookContent returns a book's details without its chapters.
 function backendFixture(){
- const books=new Map(),publications=new Map(),owned=new Map(),library=new Map(),progress=new Map(),calls=[],gates=new Map();
+ const books=new Map(),publications=new Map(),owned=new Map(),library=new Map(),progress=new Map(),calls=[],gates=new Map(),failures=new Map(),shadows=new Map(),claims=new Map();
+ // The next call of an action fails with this Firebase-style code, as a dropped connection or refused write would.
+ const failNext=(action,code,status=503)=>failures.set(action,{code,status});
  function holdNext(action){let release,started;const wait=new Promise(resolve=>release=resolve),received=new Promise(resolve=>started=resolve);gates.set(action,{wait,started});return{release,received};}
  const holdNextPublication=()=>holdNext('publishBook');
  const bucket=(map,uid)=>{if(!map.has(uid))map.set(uid,new Map());return map.get(uid);};
  const fail=(message='This shared book is unavailable.',code='folio/share-not-found',status=404)=>{throw Object.assign(new Error(message),{status,code});};
- function lookup(id,token){const entry=books.get(id);if(!entry||entry.shareToken!==token)fail();return entry;}
+ function lookup(id,token){const entry=shadows.get(id+'/'+token)||books.get(id);if(!entry||entry.shareToken!==token)fail();return entry;}
+ // Another account's edition under an ID it has seen: what the binding rules now refuse, kept here to test the app's own defence.
+ function shadow(id,uid,input){const entry={book:{...edition(uid,input),id},shareToken:randomBytes(32).toString('hex')};shadows.set(id+'/'+entry.shareToken,entry);return entry;}
  const details=entry=>{const {chapters,...meta}=entry.book;return meta;};
  function edition(uid,input,previous){
   assert.ok(Array.isArray(input.chapters)&&input.chapters.length,'the UI supplies parsed chapters');
@@ -45,16 +49,18 @@ function backendFixture(){
   }
   if(action==='updateBook'){
    const [id,input,{expectedRevision}={}]=args,entry=bucket(publications,uid).get(id);if(!entry)fail();
-   if(entry.book.revision!==expectedRevision)fail('This book was changed somewhere else. Reopen it to get the latest edition, then make your changes again.','folio/edit-conflict',409);
+   if(entry.book.revision!==expectedRevision)fail('This book was changed somewhere else, so your changes weren’t saved yet. Load the latest edition to keep them on top of it.','folio/edit-conflict',409);
    entry.book=edition(uid,input,entry.book);return entry;
   }
   if(action==='watchPublications')return[...bucket(publications,uid).values()].map(entry=>({...details(entry),shareToken:entry.shareToken}));
-  if(action==='watchOwnedBooks')return[...bucket(owned,uid).entries()].map(([id,acquiredAt])=>{const entry=books.get(id);return{...details(entry),shareToken:entry.shareToken,acquiredAt};});
+  if(action==='watchOwnedBooks')return[...bucket(owned,uid).entries()].map(([id,acquiredAt])=>{const entry=lookup(id,claims.get(uid+'/'+id));return{...details(entry),shareToken:entry.shareToken,acquiredAt};});
   if(action==='getPublicationShare'){
    const entry=bucket(publications,uid).get(args[0]);if(!entry)fail();return{book:details(entry),shareToken:entry.shareToken};
   }
   if(action==='claimSharedBook'){
-   const entry=lookup(...args);if(!bucket(owned,uid).has(entry.book.id))bucket(owned,uid).set(entry.book.id,Date.now());return{...details(entry),shareToken:entry.shareToken};
+   // Like the service, the first link an account claimed for a book ID is the one it keeps.
+   const entry=lookup(...args);if(!bucket(owned,uid).has(entry.book.id)){bucket(owned,uid).set(entry.book.id,Date.now());claims.set(uid+'/'+entry.book.id,entry.shareToken);}
+   const kept=lookup(entry.book.id,claims.get(uid+'/'+entry.book.id));return{...details(kept),shareToken:kept.shareToken};
   }
   if(action==='watchLibrary')return[...bucket(library,uid).values()];
   if(action==='saveLibraryBook'){bucket(library,uid).set(args[0],{id:args[0],...args[1]});return null;}
@@ -98,11 +104,13 @@ function backendFixture(){
   await context.addInitScript(identity=>{window.__folioInitialUser=identity},identity||null);
   await context.route('**/js/firebase-service.js',route=>route.fulfill({contentType:'text/javascript',body:adapter}));
   await context.route('**/__folio_fixture__',async route=>{
-   try{const packet=route.request().postDataJSON(),gate=gates.get(packet.action);if(gate){gates.delete(packet.action);gate.started();await gate.wait;}await route.fulfill({json:{value:dispatch(packet)}})}
+   try{const packet=route.request().postDataJSON(),gate=gates.get(packet.action);if(gate){gates.delete(packet.action);gate.started();await gate.wait;}
+    const failure=failures.get(packet.action);if(failure){failures.delete(packet.action);calls.push({action:packet.action,uid:packet.uid,args:packet.args,failed:failure.code});await route.fulfill({status:failure.status,json:{error:'Request failed.',code:failure.code}});return;}
+    await route.fulfill({json:{value:dispatch(packet)}})}
    catch(error){await route.fulfill({status:error.status||500,json:{error:error.message,code:error.code}})}
   });
  }
- return{attach,books,publications,owned,calls,holdNext,holdNextPublication,dispatch};
+ return{attach,books,publications,owned,calls,holdNext,holdNextPublication,dispatch,failNext,shadow};
 }
 
 // About 4.5 MB of chapters with quotes, CJK and emoji, over 300 chapters: far past the old 450 KB and 50-chapter limits.
@@ -241,10 +249,16 @@ test('published links convey one complete book across accounts and guest devices
    const field=page.locator('#publish-text'),size=page.locator('#publish-size'),toast=page.locator('#folio-toast');
    assert.equal(await field.getAttribute('maxlength'),null,'no character limit can trap typing');
    assert.match(await page.locator('.publisher-manuscript').innerText(),/1,000 chapters and 5 MB/);
-   await page.locator('#publish-file').setInputFiles({name:'too-large.txt',mimeType:'text/plain',buffer:Buffer.alloc(5_000_001,'a')});
-   await toast.getByText('Choose a text file of 5 MB or less.').waitFor();
-   assert.equal(await field.inputValue(),'','an oversized file changes nothing');
+   await page.locator('#publish-file').setInputFiles({name:'too-large.txt',mimeType:'text/plain',buffer:Buffer.alloc(10_000_001,'a')});
+   await toast.getByText('Choose a text file of 10 MB or less.').waitFor();
+   assert.equal(await field.inputValue(),'','a file far over the limit is not read');
    const text=largeManuscript();
+   // Windows line endings and spaced blank lines make the file larger than 5 MB, but not the book.
+   const windows=text.replaceAll('\n\n','\r\n'+' '.repeat(120)+'\r\n');assert.ok(Buffer.byteLength(windows)>5_000_000,'the file itself is over 5 MB');
+   await page.locator('#publish-file').setInputFiles({name:'windows.txt',mimeType:'text/plain',buffer:Buffer.from(windows)});
+   await toast.getByText('Your manuscript is ready.',{exact:false}).waitFor();
+   assert.match(await size.textContent(),/^4\.\d MB of 5 MB$/,'the parsed book fits');
+   await toast.waitFor({state:'hidden'});
    await page.locator('#publish-file').setInputFiles({name:'voyage.txt',mimeType:'text/plain',buffer:Buffer.from(text)});
    await toast.getByText('Your manuscript is ready.',{exact:false}).waitFor();
    assert.equal((await field.inputValue()).length,text.length);
@@ -266,8 +280,9 @@ test('published links convey one complete book across accounts and guest devices
    await page.getByRole('button',{name:'Publish book',exact:true}).click();await page.waitForTimeout(200);
    assert.equal(fixture.calls.filter(call=>call.action==='publishBook').length,publishes);
    assert.ok(await field.evaluate(element=>element.validity.customError));
+   // Cutting the text and publishing at once works, before the size meter has caught up.
    await field.evaluate((element,value)=>{element.value=value;element.dispatchEvent(new Event('input',{bubbles:true}));},text+' more');
-   await page.waitForFunction(()=>/^4\.\d MB of 5 MB$/.test(document.querySelector('#publish-size').textContent));
+   assert.match(await size.textContent(),/Too large/,'the meter has not caught up yet');
    await page.getByRole('button',{name:'Publish book',exact:true}).click();await page.locator('.publish-success').waitFor({timeout:60000});
    const input=fixture.calls.filter(call=>call.action==='publishBook').at(-1).args[0],bytes=Buffer.byteLength(JSON.stringify(input.chapters));
    assert.equal(input.chapters.length,330);assert.ok(bytes>4_000_000&&bytes<=5_000_000,`stored size ${bytes}`);
@@ -414,17 +429,17 @@ test('authors edit a published book in place, and only authors can',async t=>{
    assert.match(await page.locator('.publisher-details').innerText(),/Your link stays the same\. Everyone who has it gets this edition the next time they open it\./);
    assert.equal(await page.locator('.publish-form-footer .pill').textContent(),'Save changes ');
    await capture(page,'edit-390');
-   await page.getByRole('button',{name:'Cancel',exact:true}).click();await page.locator('.publish-success').waitFor();assert.equal(hashOf(page),'#publish','Cancel returns to where the author came from');
+   await page.getByRole('button',{name:'Close',exact:true}).click();await page.locator('.publish-success').waitFor();assert.equal(hashOf(page),'#publish','Close returns to where the author came from');
    await page.goto(base+'#account');
    const rowEdit=page.getByRole('button',{name:`Edit ${title}`,exact:true});await rowEdit.waitFor();
    assert.equal(await rowEdit.evaluate(button=>button.nextElementSibling?.dataset.action),'share-book','Edit sits before Share');
    assert.equal(await rowEdit.locator('span').isVisible(),false,'phone rows show icon buttons with labels for assistive technology');
    await openEditFrom(page,rowEdit);
-   await page.getByRole('button',{name:'Cancel',exact:true}).click();await page.locator('.profile-view').waitFor();assert.equal(hashOf(page),'#account');
+   await page.getByRole('button',{name:'Close',exact:true}).click();await page.locator('.profile-view').waitFor();assert.equal(hashOf(page),'#account');
    await page.goto(base+'#book/'+id);await page.locator('.book-ownership-label').getByText('Published by you').waitFor();
    assert.equal(await page.locator('.detail-copy [data-action="edit-book"] + [data-action="share-book"]').count(),1,'Edit book sits next to Share book');
    await openEditFrom(page,page.getByRole('button',{name:'Edit book'}));
-   await page.getByRole('button',{name:'Cancel',exact:true}).click();await page.locator('.detail-copy h1').waitFor();assert.equal(hashOf(page),'#book/'+id);
+   await page.getByRole('button',{name:'Close',exact:true}).click();await page.locator('.detail-copy h1').waitFor();assert.equal(hashOf(page),'#book/'+id);
    for(const width of [320,768,1440]){
     await page.setViewportSize({width,height:844});
     for(const hash of ['#account','#book/'+id,'#edit/'+id]){await page.goto(base+hash);await page.locator(hash==='#account'?'.profile-publication-row':hash.startsWith('#book/')?'.detail-copy [data-action="edit-book"]':'#edit-form').waitFor();assert.ok(await noOverflow(page),`${hash} fits at ${width}px`);}
@@ -455,23 +470,39 @@ test('authors edit a published book in place, and only authors can',async t=>{
    assert.equal(await guest.locator('.book-ownership-label').textContent(),' Owned');
    assert.equal(await guest.locator('[data-action="edit-book"]').count(),0,'a reader is never offered editing');
   });
-  await t.test('an edition saved elsewhere is never overwritten',async()=>{
+  await t.test('an edition saved elsewhere is never overwritten unseen, and the author keeps their changes',async()=>{
    const {page}=await contextFor(author,1440);await page.goto(base+'#edit/'+id);await page.locator('#edit-form').waitFor();
    const latest=current();fixture.dispatch({action:'updateBook',uid:author.uid,args:[id,{...latest,title:'Changed on another device',description:'Rewritten on a tablet.'},{expectedRevision:latest.revision}]});
    await page.locator('#publish-description').fill('Edited here as well.');
+   const text=page.locator('#publish-text');await text.evaluate(element=>{element.dataset.marker='kept';element.focus();element.setSelectionRange(12,12);});
    await page.getByRole('button',{name:'Save changes'}).click();
-   const alert=page.getByRole('alert');await alert.getByText('This book was changed somewhere else. Reopen it to get the latest edition, then make your changes again.').waitFor();
+   const alert=page.getByRole('alert');await alert.getByText('This book was changed somewhere else, so your changes weren’t saved yet. Load the latest edition to keep them on top of it.').waitFor();
    assert.equal(await page.evaluate(()=>document.activeElement?.getAttribute('role')),'alert','the message receives focus');
    assert.equal(await page.locator('#publish-description').inputValue(),'Edited here as well.','the changes stay on screen');
+   assert.deepEqual(await page.evaluate(()=>{const field=document.querySelector('#publish-text');return [field.dataset.marker,field.selectionStart,field.disabled];}),['kept',12,false],'the form is updated in place, never rebuilt');
    assert.equal(current().title,'Changed on another device');assert.deepEqual(updates().at(-1).args[2],{expectedRevision:2});
    await capture(page,'edit-conflict-1440');
-   await alert.getByRole('button',{name:'Load the latest edition'}).click();
+   for(const name of ['Load the latest edition with my changes','Discard my changes'])assert.ok((await alert.getByRole('button',{name}).boundingBox()).height>=44,`${name} is a full-size target`);
+   await alert.getByRole('button',{name:'Load the latest edition with my changes'}).click();
    await page.waitForFunction(()=>document.querySelector('#publish-title')?.value==='Changed on another device');
-   assert.equal(await page.locator('#publish-description').inputValue(),'Rewritten on a tablet.');
-   assert.equal(await page.locator('.publisher-restored').count(),0);assert.equal(await page.getByRole('alert').count(),0);
+   assert.equal(await page.locator('#publish-description').inputValue(),'Edited here as well.','the author\'s change is kept on top of the latest edition');
+   await page.locator('.publisher-restored').getByText('Loaded the latest edition with your changes. Saving replaces the changes made elsewhere to the description.').waitFor();
+   assert.equal(await page.getByRole('alert').count(),0);
+   await until(async()=>(await storedDraft(page,editKey(id)))?.revision===3,'the kept changes are stored against the latest edition');
    title='The Harbour Ledger, Third Edition';await page.locator('#publish-title').fill(title);
    await page.getByRole('button',{name:'Save changes'}).click();await page.waitForFunction(id=>location.hash==='#book/'+id,id);
-   assert.deepEqual(updates().at(-1).args[2],{expectedRevision:3});assert.equal(current().revision,4);assert.equal(current().description,'Rewritten on a tablet.');
+   assert.deepEqual(updates().at(-1).args[2],{expectedRevision:3});assert.equal(current().revision,4);assert.equal(current().description,'Edited here as well.');
+   // Discarding after a conflict asks first, then opens the latest edition without the author's changes.
+   await page.goto(base+'#edit/'+id);await page.locator('#edit-form').waitFor();
+   fixture.dispatch({action:'updateBook',uid:author.uid,args:[id,{...current(),description:'From the phone.'},{expectedRevision:4}]});
+   await page.locator('#publish-description').fill('Not wanted after all.');await page.getByRole('button',{name:'Save changes'}).click();
+   await page.getByRole('alert').getByRole('button',{name:'Discard my changes'}).waitFor();
+   page.once('dialog',dialog=>dialog.dismiss());await page.getByRole('button',{name:'Discard my changes'}).click();
+   assert.equal(await page.locator('#publish-description').inputValue(),'Not wanted after all.','declining the question keeps the changes');
+   page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Discard my changes'}).click();
+   await page.waitForFunction(()=>document.querySelector('#publish-description')?.value==='From the phone.');
+   await until(async()=>await storedDraft(page,editKey(id))===null,'the discarded draft is removed');
+   title=current().title;
   });
   await t.test('unsaved edits are kept apart from the new-book draft, survive a reload, and can be discarded',async()=>{
    const {page}=await contextFor(author,1440);await page.goto(base+'#publish');await page.locator('#publish-form').waitFor();
@@ -492,33 +523,44 @@ test('authors edit a published book in place, and only authors can',async t=>{
    await page.reload();await page.locator('#edit-form').waitFor();
    await page.locator('.publisher-restored').getByText('Restored your unsaved changes.').waitFor();
    assert.equal(await field.inputValue(),'Unsaved title');
+   assert.ok((await page.getByRole('button',{name:'Discard changes'}).boundingBox()).height>=44,'Discard changes is a full-size target');
+   assert.ok(await page.locator('.publisher-restored').evaluate(banner=>{const icon=banner.querySelector('svg').getBoundingClientRect(),text=banner.querySelector('p').getBoundingClientRect();return Math.abs(icon.top-text.top)<8;}),'the icon sits beside the first line of the note');
    assert.equal(await page.evaluate(()=>document.activeElement?.tagName),'H1');
    await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>document.activeElement?.dataset.action),'discard-edit-draft');
    await page.keyboard.press('Tab');assert.equal(await page.evaluate(()=>document.activeElement?.id),'publish-title');
    await capture(page,'edit-restored-1440');
    await page.goto(base+'#publish');await page.locator('#publish-form').waitFor();assert.equal(await page.locator('#publish-title').inputValue(),'A different book');
    await page.goto(base+'#edit/'+id);await page.locator('.publisher-restored').waitFor();
-   await page.getByRole('button',{name:'Discard changes'}).click();
+   page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Discard changes'}).click();
    await page.locator('#folio-toast').getByText('Your unsaved changes were discarded.').waitFor();
    assert.equal(await field.inputValue(),title);assert.equal(await page.locator('.publisher-restored').count(),0);
    await until(async()=>await storedDraft(page,editKey(id))===null,'the edit draft is removed');
    await page.reload();await page.locator('#edit-form').waitFor();assert.equal(await page.locator('.publisher-restored').count(),0);assert.equal(await field.inputValue(),title);
-   // A draft made on an older edition still saves against that edition, so the newer one is never overwritten.
+   // A draft made on an older edition brings back only the fields it changed, on top of the newer edition.
    const startedFrom=current().revision;await field.fill('Drafted on the old edition');
    await until(async()=>(await storedDraft(page,editKey(id)))?.title==='Drafted on the old edition','the edit draft is stored');
-   fixture.dispatch({action:'updateBook',uid:author.uid,args:[id,{...current(),title:'Saved on a phone'},{expectedRevision:startedFrom}]});
-   await page.reload();await page.locator('.publisher-restored').getByText('Restored your unsaved changes. The book has changed since you made them.').waitFor();
-   await page.getByRole('button',{name:'Save changes'}).click();await page.getByRole('alert').getByText('This book was changed somewhere else.',{exact:false}).waitFor();
-   assert.deepEqual(updates().at(-1).args[2],{expectedRevision:startedFrom});assert.equal(current().title,'Saved on a phone');
-   await page.getByRole('button',{name:'Load the latest edition'}).click();await page.waitForFunction(()=>document.querySelector('#publish-title')?.value==='Saved on a phone');
-   await until(async()=>await storedDraft(page,editKey(id))===null,'loading the latest edition clears the draft');
+   assert.deepEqual((await storedDraft(page,editKey(id))).changed,['title'],'the draft remembers which fields it changed');
+   fixture.dispatch({action:'updateBook',uid:author.uid,args:[id,{...current(),title:'Saved on a phone',description:'Phone description.'},{expectedRevision:startedFrom}]});
+   await page.reload();await page.locator('.publisher-restored').getByText('Restored your unsaved changes on top of the latest edition, which changed since you made them.').waitFor();
+   assert.equal(await field.inputValue(),'Drafted on the old edition');assert.equal(await page.locator('#publish-description').inputValue(),'Phone description.');
+   await page.getByRole('button',{name:'Save changes'}).click();await page.waitForFunction(id=>location.hash==='#book/'+id,id);
+   assert.deepEqual(updates().at(-1).args[2],{expectedRevision:startedFrom+1},'the save builds on the newer edition');
+   assert.deepEqual([current().title,current().description],['Drafted on the old edition','Phone description.']);
+   await until(async()=>await storedDraft(page,editKey(id))===null,'the saved draft is removed');
+   title=current().title;
   });
-  await t.test('readers, guests, and unknown books get the not-found page',async()=>{
+  await t.test('readers and unknown books get the not-found page; signed-out visitors are asked to sign in',async()=>{
    const saves=updates().length;
    const {page:reader}=await contextFor(recipient,390);await reader.goto(shareUrl);await reader.locator('.book-ownership-label').getByText('Owned').waitFor();
    assert.equal(await reader.locator('[data-action="edit-book"]').count(),0);
    await reader.goto(base+'#edit/'+id);await reader.locator('.not-found-view').waitFor();assert.equal(await reader.locator('#edit-form').count(),0);
-   const {page:guest}=await contextFor(null,390);await guest.goto(base+'#edit/'+id);await guest.locator('.not-found-view').waitFor();
+   const {page:guest}=await contextFor(null,390);await guest.goto(base+'#edit/'+id);
+   await guest.getByRole('heading',{name:'Sign in to edit your book.'}).waitFor();assert.equal(await guest.getByRole('button',{name:/Sign in to edit/}).count(),1);
+   await guest.goto(base+'#edit/quiet');await guest.locator('.not-found-view').waitFor();
+   // Signing in on the page opens the form for the author; signing out there asks again.
+   await guest.goto(base+'#edit/'+id);await guest.getByRole('heading',{name:'Sign in to edit your book.'}).waitFor();
+   await guest.evaluate(identity=>window.folioTestAuth(identity),author);await guest.locator('#edit-form').waitFor();
+   await guest.evaluate(()=>window.folioTestAuth(null));await guest.getByRole('heading',{name:'Sign in to edit your book.'}).waitFor();
    const {page}=await contextFor(author,390);
    for(const hash of ['#edit/b-00000000-0000-4000-8000-000000000000','#edit/quiet','#edit/%E0']){await page.goto(base+hash);await page.locator('.not-found-view').waitFor();}
    assert.equal(updates().length,saves);
@@ -528,7 +570,7 @@ test('authors edit a published book in place, and only authors can',async t=>{
    await page.locator('#publish-title').fill('A late edition');
    const gate=fixture.holdNext('updateBook');await page.getByRole('button',{name:'Save changes'}).click();await gate.received;
    const submit=page.locator('.publish-form-footer .pill');
-   assert.equal(await submit.textContent(),'Saving… ');assert.ok(await submit.isDisabled());assert.ok(await page.locator('#publish-title').isDisabled());assert.ok(await page.getByRole('button',{name:'Cancel',exact:true}).isDisabled());
+   assert.equal(await submit.textContent(),'Saving… ');assert.ok(await submit.isDisabled());assert.ok(await page.locator('#publish-title').isDisabled());assert.ok(await page.getByRole('button',{name:'Close',exact:true}).isDisabled());
    await page.evaluate(identity=>window.folioTestAuth(identity),unrelated);await page.locator('.not-found-view').waitFor();
    await page.evaluate(identity=>window.folioTestAuth(identity),author);await page.locator('#edit-form').waitFor();
    const completed=page.waitForResponse(response=>response.url().endsWith('/__folio_fixture__')&&response.request().postDataJSON()?.action==='updateBook');
@@ -537,5 +579,137 @@ test('authors edit a published book in place, and only authors can',async t=>{
    assert.ok(await page.locator('#edit-form').isVisible());assert.equal(await page.locator('#publish-title').inputValue(),'A late edition','the unsaved changes came back with the author');
    assert.deepEqual(errors,[]);
   });
+ }finally{await Promise.all(contexts.map(context=>context.close()));await browser.close();}
+});
+
+test('authors keep their work across tabs, failed saves, and leaving while a save is pending',async t=>{
+ const browser=await launchBrowser(),fixture=backendFixture(),contexts=[],errors=[];
+ async function contextFor(identity,width=1280){const context=await browser.newContext({viewport:{width,height:900},reducedMotion:'reduce'});contexts.push(context);await fixture.attach(context,identity);const page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));return{context,page};}
+ const newKey='user.'+author.uid,editKey=id=>`${newKey}.edit.${id}`;
+ let id;
+ try{
+  await t.test('a new-book draft another tab cleared is written back by the tab that still shows it',async()=>{
+   const {context,page:tabB}=await contextFor(author);await tabB.goto(base+'#publish');await tabB.locator('#publish-form').waitFor();
+   await tabB.locator('#publish-title').fill('B novel');await tabB.locator('#publish-text').fill('# One\n\nB spent all evening writing this chapter.');
+   await until(async()=>(await storedDraft(tabB,newKey))?.title==='B novel','tab B stores its draft');
+   const tabA=await context.newPage();tabA.on('pageerror',error=>errors.push(error.message));await tabA.goto(base+'#publish');await tabA.locator('#publish-form').waitFor();
+   assert.equal(await tabA.locator('#publish-title').inputValue(),'B novel','tab A restores the stored draft');
+   await tabA.locator('#publish-title').fill('A novel');await tabA.locator('#publish-description').fill('Published from tab A.');
+   await tabA.getByRole('button',{name:'Publish book',exact:true}).click();await tabA.locator('.publish-success').waitFor();
+   id=(await tabA.locator('#published-share-link').inputValue()).split('#shared/')[1].split('/')[0];
+   await until(async()=>await storedDraft(tabA,newKey)===null,'publishing clears the draft tab A submitted');
+   assert.equal(await tabB.locator('#publish-title').inputValue(),'B novel','tab B still shows its text');
+   await tabB.evaluate(()=>{location.hash='#account';});await tabB.locator('.profile-view').waitFor();
+   await until(async()=>(await storedDraft(tabB,newKey))?.manuscript==='# One\n\nB spent all evening writing this chapter.','leaving the form writes back what tab B showed');
+   await tabB.close();const reopened=await context.newPage();await reopened.goto(base+'#publish');await reopened.locator('#publish-form').waitFor();
+   assert.equal(await reopened.locator('#publish-title').inputValue(),'B novel');
+  });
+  await t.test('an edit draft survives another tab saving its own changes',async()=>{
+   const {context,page:tabA}=await contextFor(author);await tabA.goto(base+'#edit/'+id);await tabA.locator('#edit-form').waitFor();
+   const tabB=await context.newPage();tabB.on('pageerror',error=>errors.push(error.message));await tabB.goto(base+'#edit/'+id);await tabB.locator('#edit-form').waitFor();
+   await tabB.locator('#publish-description').fill('B rewrote the description.');
+   await until(async()=>(await storedDraft(tabB,editKey(id)))?.description==='B rewrote the description.','tab B stores its edit draft');
+   await tabA.locator('#publish-title').fill('A retitled it');
+   await until(async()=>(await storedDraft(tabA,editKey(id)))?.title==='A retitled it','tab A overwrites the shared draft key');
+   await tabA.getByRole('button',{name:'Save changes'}).click();await tabA.waitForFunction(id=>location.hash==='#book/'+id,id);
+   await until(async()=>await storedDraft(tabA,editKey(id))===null,'tab A clears the draft it saved');
+   await tabB.getByRole('button',{name:'Close',exact:true}).click();await tabB.waitForFunction(()=>!location.hash.startsWith('#edit/'));
+   await until(async()=>(await storedDraft(tabB,editKey(id)))?.description==='B rewrote the description.','closing tab B keeps its changes as a draft');
+   await tabB.goto(base+'#edit/'+id);await tabB.locator('.publisher-restored').waitFor();
+   assert.equal(await tabB.locator('#publish-description').inputValue(),'B rewrote the description.');
+   assert.equal(await tabB.locator('#publish-title').inputValue(),'A retitled it','tab A\'s saved title is kept under tab B\'s change');
+   tabB.once('dialog',dialog=>dialog.accept());await tabB.getByRole('button',{name:'Discard changes'}).click();await until(async()=>await storedDraft(tabB,editKey(id))===null,'discarded');
+  });
+  await t.test('a failed save says the changes were not saved, keeps the form in place, and offers no reading messages',async()=>{
+   const {page}=await contextFor(author);await page.goto(base+'#edit/'+id);await page.locator('#edit-form').waitFor();
+   const text=page.locator('#publish-text');await page.locator('#publish-description').fill('Written offline.');
+   await text.evaluate(element=>{element.dataset.marker='kept';element.focus();element.setSelectionRange(5,9);element.scrollTop=0;});
+   for(const [code,message] of [['unavailable','Your changes weren’t saved. Check your connection and try again — they’re kept on this device.'],['permission-denied','Folio couldn’t save this edition. Sign in again, then try again.'],['invalid-argument','Your changes weren’t saved. Please try again — they’re kept on this device.']]){
+    fixture.failNext('updateBook',code);await page.getByRole('button',{name:'Save changes'}).click();
+    await page.getByRole('alert').getByText(message).waitFor();
+    assert.doesNotMatch(await page.getByRole('alert').innerText(),/reading|sync/i);
+    assert.deepEqual(await text.evaluate(element=>[element.dataset.marker,element.selectionStart,element.selectionEnd,element.disabled]),['kept',5,9,false]);
+    assert.equal(await page.locator('.publisher-error').count(),1,'one message at a time');
+   }
+   assert.notEqual(fixture.books.get(id).book.description,'Written offline.');
+   // Publishing reports its own failures the same way.
+   await page.goto(base+'#publish');await page.locator('#publish-form').waitFor();
+   await page.locator('#publish-title').fill('Offline book');await page.locator('#publish-description').fill('Not yet.');await page.locator('#publish-text').fill('# One\n\nWords.');
+   fixture.failNext('publishBook','unavailable');await page.getByRole('button',{name:'Publish book',exact:true}).click();
+   await page.getByRole('alert').getByText('Your book wasn’t published. Check your connection and try again — your draft is kept on this device.').waitFor();
+   assert.equal(await page.locator('#publish-title').inputValue(),'Offline book');
+  });
+  await t.test('a save that fails after the author leaves the page is still reported',async()=>{
+   const {page}=await contextFor(author);await page.goto(base+'#edit/'+id);await page.locator('#edit-form').waitFor();
+   await page.locator('#publish-title').fill('Saved while leaving');
+   const gate=fixture.holdNext('updateBook');fixture.failNext('updateBook','unavailable');
+   await page.getByRole('button',{name:'Save changes'}).click();await gate.received;
+   await page.evaluate(()=>{location.hash='#discover';});await page.locator('.home-view').waitFor();
+   gate.release();
+   await page.locator('#folio-toast').getByText('Your changes to “Saved while leaving” weren’t saved. They’re kept on this device; open Edit to try again.').waitFor();
+   await page.goto(base+'#edit/'+id);await page.locator('.publisher-restored').waitFor();assert.equal(await page.locator('#publish-title').inputValue(),'Saved while leaving');
+   page.once('dialog',dialog=>dialog.accept());await page.getByRole('button',{name:'Discard changes'}).click();await until(async()=>await storedDraft(page,editKey(id))===null,'discarded');
+  });
+  await t.test('editing reuses the edition already on this device instead of downloading it again',async()=>{
+   const {page}=await contextFor(author);await page.goto(base+'#book/'+id);await page.locator('.excerpt-text .drop-cap').waitFor();
+   const downloads=()=>fixture.calls.filter(call=>call.action==='getBookContent').length,before=downloads();
+   await page.getByRole('button',{name:'Edit book'}).click();await page.locator('#edit-form').waitFor();
+   assert.equal(downloads(),before,'the same revision is not downloaded again');
+   assert.equal(await page.locator('#publish-text').inputValue(),formatManuscript(fixture.books.get(id).book.chapters));
+   const latest=fixture.books.get(id).book;fixture.dispatch({action:'updateBook',uid:author.uid,args:[id,{...latest,chapters:[...latest.chapters,{title:'Added elsewhere',paragraphs:['A new chapter.']}]},{expectedRevision:latest.revision}]});
+   await page.getByRole('button',{name:'Close',exact:true}).click();await page.locator('.detail-copy').waitFor();
+   await page.getByRole('button',{name:'Edit book'}).click();await page.locator('#edit-form').waitFor();
+   assert.equal(downloads(),before+1,'a newer revision is downloaded');assert.match(await page.locator('#publish-text').inputValue(),/# Added elsewhere/);
+   await page.locator('#publish-text').evaluate(element=>{element.value+='\n\n'+'x '.repeat(2_600_000);element.dispatchEvent(new Event('input',{bubbles:true}));});
+   await page.locator('#publish-size').getByText(/Too large to save$/).waitFor();
+  });
+  await t.test('while a book page waits for its text, the status reads at full contrast and long titles keep room in account rows',async()=>{
+   const {page}=await contextFor(author,390);await page.goto(base+'#discover');await page.locator('.home-view').waitFor();
+   const gate=fixture.holdNext('getBookContent');await page.goto(base+'#book/'+id);await gate.received;
+   const status=page.locator('.excerpt-status [role="status"]');await status.waitFor();
+   assert.equal(await page.locator('.excerpt-paper .excerpt-fade').count(),0,'no fade covers the status');
+   assert.equal(await status.evaluate(element=>getComputedStyle(element).color),'rgb(74, 59, 40)');
+   gate.release();await page.locator('.excerpt-text .drop-cap').waitFor();
+   fixture.dispatch({action:'updateBook',uid:author.uid,args:[id,{...fixture.books.get(id).book,title:'The Extraordinarily Long Harbour Ledger of Lighthouses'},{expectedRevision:fixture.books.get(id).book.revision}]});
+   await page.goto(base+'#account');await page.reload();
+   const row=page.locator('.profile-publication-row strong').first();await row.getByText('The Extraordinarily Long').waitFor();
+   for(const width of [401,701,768,834,900]){
+    await page.setViewportSize({width,height:900});await page.evaluate(()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve))));
+    assert.ok((await row.evaluate(element=>element.getBoundingClientRect().width))>=120,`a book title keeps at least 120px at ${width}px`);
+    assert.ok(await noOverflow(page));
+   }
+   assert.deepEqual(errors,[]);
+  });
+ }finally{await Promise.all(contexts.map(context=>context.close()));await browser.close();}
+});
+
+test('a link under a book ID this reader already has never replaces that book',async t=>{
+ const browser=await launchBrowser(),fixture=backendFixture(),contexts=[],errors=[];
+ async function contextFor(identity,width=1280){const context=await browser.newContext({viewport:{width,height:900},reducedMotion:'reduce'});contexts.push(context);await fixture.attach(context,identity);const page=await context.newPage();page.on('pageerror',error=>errors.push(error.message));return{context,page};}
+ const intruder={uid:'intruder-b',email:'b@example.test',displayName:'Someone Else'};
+ try{
+  const {page:writer}=await contextFor(author);await writer.goto(base+'#publish');await writer.locator('#publish-form').waitFor();
+  await writer.locator('#publish-title').fill('The Coast');await writer.locator('#publish-description').fill('The genuine book.');await writer.locator('#publish-text').fill('# One\n\nGENUINE-TEXT-BY-A');
+  await writer.getByRole('button',{name:'Publish book',exact:true}).click();await writer.locator('.publish-success').waitFor();
+  const genuine=await writer.locator('#published-share-link').inputValue(),id=genuine.split('#shared/')[1].split('/')[0];
+  const fake=fixture.shadow(id,intruder.uid,{title:'The Coast',author:'Mara Ellison',description:'Bait.',chapters:[{title:'One',paragraphs:['SHADOW-TEXT-BY-B']}]});
+  fake.book={...fake.book,revision:8};
+  const shadowLink=`${base}#shared/${id}/${fake.shareToken}`;
+  const readText=async page=>{await page.goto(base+'#read/'+id);await page.locator('.fr-book[aria-busy="false"]').waitFor();return page.locator('.fr-page-body').first().innerText();};
+  for(const identity of [null,recipient]){
+   await t.test(`${identity?'a signed-in reader':'a guest'} keeps the genuine book`,async()=>{
+    const {page}=await contextFor(identity);await page.goto(genuine);await page.locator('.book-ownership-label').waitFor();
+    assert.match(await readText(page),/GENUINE-TEXT-BY-A/);
+    await page.goto(shadowLink);await page.getByRole('alert').getByText('This link doesn’t match the book you already have with this ID.',{exact:false}).waitFor();
+    assert.match(await readText(page),/GENUINE-TEXT-BY-A/,'the other edition never replaces the text');
+    await page.reload();await page.locator('.fr-book[aria-busy="false"]').waitFor();assert.match(await page.locator('.fr-page-body').first().innerText(),/GENUINE-TEXT-BY-A/);
+   });
+  }
+  await t.test('an account keeps the first link it claimed, on any device',async()=>{
+   const {page}=await contextFor(recipient);await page.goto(shadowLink);
+   await page.getByRole('alert').getByText('This link doesn’t match the book you already have with this ID.',{exact:false}).waitFor();
+   assert.match(await readText(page),/GENUINE-TEXT-BY-A/);
+  });
+  assert.deepEqual(errors,[]);
  }finally{await Promise.all(contexts.map(context=>context.close()));await browser.close();}
 });

@@ -1,3 +1,4 @@
+import {countWords} from './words.js';
 // Device-local checkout and access records. A live payment processor will need
 // server-verified entitlements; these records never handle payment credentials.
 export const PLANS = Object.freeze({
@@ -12,9 +13,10 @@ export function bookPrice(book){
  const amount=Number.isSafeInteger(book?.priceCents)&&book.priceCents>=0&&book.priceCents<=9999999?book.priceCents:499;
  return {amount,price:new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format(amount/100),currency:'USD'};
 }
+// Chapter One's words, counted as the reader counts them.
 export function previewLimit(book){
  for(const chapter of book?.chapters || []){
-  const count=(chapter.paragraphs || []).join(' ').trim().split(/\s+/u).filter(Boolean).length;
+  const count=(chapter.paragraphs || []).reduce((total,paragraph)=>total+countWords(paragraph),0);
   if(count)return count;
  }
  return 0;

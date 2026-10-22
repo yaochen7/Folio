@@ -28,7 +28,7 @@ const ERROR_MESSAGES = {
   'folio/wrong-account': 'This library belongs to a different account. Please sign in again.',
   'folio/share-not-found': 'This book link is unavailable. Ask the author for a new link.',
   'folio/book-too-large': 'This book is too large. Use up to 1,000 chapters and 5 MB of text.',
-  'folio/edit-conflict': 'This book was changed somewhere else. Reopen it to get the latest edition, then make your changes again.',
+  'folio/edit-conflict': 'This book was changed somewhere else, so your changes weren’t saved yet. Load the latest edition to keep them on top of it.',
   'folio/invalid-book': 'Check the title, author, and chapter text before publishing.',
   'auth/invalid-email': 'Enter a valid email address.',
   'auth/missing-email': 'Enter your email address.',
@@ -533,6 +533,11 @@ export function createFirebaseService({
     return sdk.firestore.doc(db, 'folioCatalog', bookId, 'shares', shareToken, 'parts', String(index));
   }
 
+  /** Create-only and unreadable: the book ID belongs to this link, so no other account can add one. */
+  function bindingDoc(bookId) {
+    return sdk.firestore.doc(db, 'folioCatalog', bookId, 'binding', 'owner');
+  }
+
   /** Author head + a get-only link head, with the manuscript stored once as parts under the link. */
   async function publishBook(uid, input) {
     try {
@@ -547,6 +552,7 @@ export function createFirebaseService({
       const batch = sdk.firestore.writeBatch(db);
       batch.set(userDoc(uid, 'publications', bookId), { ...head, shareToken });
       batch.set(shareDoc(bookId, shareToken), head);
+      batch.set(bindingDoc(bookId), { ownerUid: uid, shareToken });
       parts.forEach((text, index) => batch.set(partDoc(bookId, shareToken, index), { bookId, ownerUid: uid, revision: 1, index, text }));
       assertOwner(uid);
       await batch.commit();
@@ -592,9 +598,11 @@ export function createFirebaseService({
         parts.forEach((text, index) => transaction.set(partDoc(bookId, shareToken, index), { bookId, ownerUid: uid, revision, index, text }));
         const previousParts = !legacyPublication(current) && boundedCount(current.partCount, MAX_PARTS) ? current.partCount : MAX_PARTS;
         for (let index = parts.length; index < previousParts; index += 1) transaction.delete(partDoc(bookId, shareToken, index));
-        return { shareToken, revision, publishedAt: current.publishedAt };
+        return { shareToken, revision, publishedAt: current.publishedAt, legacy: legacyPublication(current) };
       });
       assertOwner(uid);
+      // A book published before bindings existed claims its ID now; an existing binding refuses this quietly.
+      if (saved.legacy) try { await sdk.firestore.setDoc(bindingDoc(bookId), { ownerUid: uid, shareToken: saved.shareToken }); } catch { /* already bound */ }
       const head = publicationHead(bookId, uid, meta, content, parts.length, saved.revision, Math.trunc(now()));
       return { book: { ...publicationMeta(bookId, { ...head, publishedAt: saved.publishedAt }), chapters: content.chapters }, shareToken: saved.shareToken };
     } catch (error) {
@@ -703,6 +711,7 @@ export function createFirebaseService({
     let closed = false;
     let sequence = 0;
     const resolved = new Map();
+    const delivered = new Map();
     const stopQuery = watchQuery(uid, () => sdk.firestore.query(sdk.firestore.collection(db, 'folioUsers', uid, 'owned'),
       sdk.firestore.orderBy('acquiredAt', 'desc'), sdk.firestore.limit(500)), snapshot => snapshot.docs.map(item => ({ ...item.data(), id: item.id })), (records, error) => {
       const revision = ++sequence;
@@ -712,16 +721,25 @@ export function createFirebaseService({
       void Promise.all(records.map(async record => {
         assertShare(record.id, record.shareToken);
         if (record.bookId !== record.id || record.source !== 'shared') throw serviceError('folio/share-not-found');
+        // Heads change with every edit, so each snapshot reads them again; only a read still in flight is shared.
         const key = `${record.id}/${record.shareToken}`;
-        if (!resolved.has(key)) resolved.set(key, getSharedBook(record.id, record.shareToken).catch(error => { resolved.delete(key); throw error; }));
-        return { ...await resolved.get(key), shareToken: record.shareToken, acquiredAt: timestampMillis(record.acquiredAt) };
+        if (!resolved.has(key)) {
+          const pending = getSharedBook(record.id, record.shareToken).finally(() => { if (resolved.get(key) === pending) resolved.delete(key); });
+          resolved.set(key, pending);
+        }
+        const book = await resolved.get(key);
+        // A slower, older read never replaces an edition this watch has already delivered.
+        const known = delivered.get(key);
+        const latest = known && known.revision > book.revision ? known : book;
+        delivered.set(key, latest);
+        return { ...latest, shareToken: record.shareToken, acquiredAt: timestampMillis(record.acquiredAt) };
       })).then(books => {
         if (!closed && revision === sequence && currentUser?.uid === uid) callback(books, null);
       }).catch(error => {
         if (!closed && revision === sequence && currentUser?.uid === uid) callback(null, mappedError(error));
       });
     });
-    return () => { closed = true; sequence += 1; resolved.clear(); stopQuery(); };
+    return () => { closed = true; sequence += 1; resolved.clear(); delivered.clear(); stopQuery(); };
   }
 
   return { initFirebase, subscribeAuth, signUp, signIn, signInWithGoogle, sendPasswordReset, signOut,

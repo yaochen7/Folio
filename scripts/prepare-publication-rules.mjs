@@ -12,12 +12,13 @@ const USAGE = 'Usage: node scripts/prepare-publication-rules.mjs [--replace --ex
 /** Hash of a block with CRLF line endings read as LF, so a reviewed hash matches either checkout style. */
 export const blockSha256 = block => createHash('sha256').update(block.replaceAll('\r\n', '\n'), 'utf8').digest('hex');
 
+/** The repository block with LF endings, whatever the checkout used; callers convert it to the policy's style. */
 function folioBlock(folio) {
   if (typeof folio !== 'string') throw new TypeError('Rules source must be text.');
   const begin = folio.indexOf(BEGIN);
   const end = folio.indexOf(END, begin) + END.length;
   if (begin < 0 || end < END.length || folio.indexOf(BEGIN, begin + BEGIN.length) !== -1) throw new Error('Expected one Folio publications block.');
-  return folio.slice(begin, end);
+  return folio.slice(begin, end).replaceAll('\r\n', '\n');
 }
 
 function occurrences(text, marker) {
@@ -33,7 +34,9 @@ export function addPublicationRules(active, folio) {
   const roots = [...active.matchAll(/match\s+\/databases\/\{[^}]+\}\/documents\s*\{/g)];
   if (roots.length !== 1 || !roots[0][0].includes('{database}')) throw new Error('Expected one default Firestore documents root using {database}.');
   const insertion = roots[0].index + roots[0][0].length;
-  const block = `\n${folioRules}\n`;
+  // The inserted lines follow the active policy's line endings.
+  const eol = active.includes('\r\n') ? '\r\n' : '\n';
+  const block = `\n${folioRules}\n`.replaceAll('\n', eol);
   const merged = active.slice(0, insertion) + block + active.slice(insertion);
   // Enforce byte-for-byte preservation of the policy around the one inserted block.
   if (merged.slice(0, insertion) + merged.slice(insertion + block.length) !== active) throw new Error('Existing rule preservation failed.');

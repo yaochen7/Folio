@@ -92,18 +92,41 @@ service cloud.firestore {
         && data.revision == previous.get('revision', 0) + 1;
     }
 
-    function folioPublicationPartAt(bookId, token, data, index) {
-      return getAfter(/databases/$(database)/documents/folioCatalog/$(bookId)/shares/$(token)/parts/$(index)).data.revision == data.revision;
+    function folioPublicationPartPath(bookId, token, index) {
+      return /databases/$(database)/documents/folioCatalog/$(bookId)/shares/$(token)/parts/$(index);
     }
 
-    // Every part the head names must be written with the head's revision in the same request.
+    // One document read per slot: a part below partCount gives its UTF-8 size when it carries the head's
+    // revision; a slot at or above partCount must be empty after the request. Anything else is far below zero.
+    function folioPublicationPartBytes(part, data) {
+      return part.revision == data.revision ? part.text.toUtf8().size() : -100000000;
+    }
+
+    function folioPublicationSlot(bookId, token, data, index) {
+      return index < data.partCount
+        ? folioPublicationPartBytes(getAfter(folioPublicationPartPath(bookId, token, index)).data, data)
+        : (existsAfter(folioPublicationPartPath(bookId, token, index)) ? -100000000 : 0);
+    }
+
+    // The parts the head names, written with its revision in the same request, hold exactly contentBytes,
+    // and no part beyond them remains readable.
     function folioPublicationParts(bookId, token, data) {
-      return folioPublicationPartAt(bookId, token, data, 0)
-        && (data.partCount <= 1 || folioPublicationPartAt(bookId, token, data, 1))
-        && (data.partCount <= 2 || folioPublicationPartAt(bookId, token, data, 2))
-        && (data.partCount <= 3 || folioPublicationPartAt(bookId, token, data, 3))
-        && (data.partCount <= 4 || folioPublicationPartAt(bookId, token, data, 4))
-        && (data.partCount <= 5 || folioPublicationPartAt(bookId, token, data, 5));
+      return folioPublicationSlot(bookId, token, data, 0) + folioPublicationSlot(bookId, token, data, 1)
+        + folioPublicationSlot(bookId, token, data, 2) + folioPublicationSlot(bookId, token, data, 3)
+        + folioPublicationSlot(bookId, token, data, 4) + folioPublicationSlot(bookId, token, data, 5) == data.contentBytes;
+    }
+
+    // The link head always matches the author head of the same request (one read of it).
+    function folioPublicationLinked(bookId, token, data) {
+      let author = getAfter(folioPublicationAuthorCopy(bookId)).data;
+      return author.shareToken == token && author.diff(data).affectedKeys().hasOnly(['shareToken'])
+        && folioPublicationParts(bookId, token, data);
+    }
+
+    // A book ID belongs to its first link. The binding is create-only and unreadable, so no other
+    // account can add a link of its own under an ID it has seen.
+    function folioPublicationBinding(bookId) {
+      return /databases/$(database)/documents/folioCatalog/$(bookId)/binding/owner;
     }
 
     // Parts change only in the same request as their share head, by its owner.
@@ -156,17 +179,15 @@ service cloud.firestore {
           'description', 'category', 'priceCents', 'publishedAt', 'updatedAt', 'revision', 'partCount', 'contentBytes',
           'chapterCount', 'wordCount'])
         && folioPublicationToken(shareToken)
-        && getAfter(folioPublicationAuthorCopy(bookId)).data.shareToken == shareToken
-        && getAfter(folioPublicationAuthorCopy(bookId)).data.diff(request.resource.data).affectedKeys().hasOnly(['shareToken'])
-        && folioPublicationParts(bookId, shareToken, request.resource.data);
+        && folioPublicationLinked(bookId, shareToken, request.resource.data)
+        && !exists(folioPublicationBinding(bookId))
+        && getAfter(folioPublicationBinding(bookId)).data.shareToken == shareToken;
       allow update: if folioPublicationOwner(resource.data.ownerUid) && folioPublicationHead(request.resource.data, bookId)
         && folioPublicationEdited(request.resource.data, resource.data)
         && request.resource.data.keys().hasOnly(['bookId', 'ownerUid', 'title', 'author', 'genre', 'kind', 'kicker',
           'description', 'category', 'priceCents', 'publishedAt', 'updatedAt', 'revision', 'partCount', 'contentBytes',
           'chapterCount', 'wordCount'])
-        && getAfter(folioPublicationAuthorCopy(bookId)).data.shareToken == shareToken
-        && getAfter(folioPublicationAuthorCopy(bookId)).data.diff(request.resource.data).affectedKeys().hasOnly(['shareToken'])
-        && folioPublicationParts(bookId, shareToken, request.resource.data);
+        && folioPublicationLinked(bookId, shareToken, request.resource.data);
       allow delete: if false;
 
       match /parts/{index} {
@@ -177,6 +198,19 @@ service cloud.firestore {
         allow delete: if index.matches('^[0-5]$')
           && folioPublicationPartRemoved(int(index), getAfter(folioPublicationShare(bookId, shareToken)).data);
       }
+    }
+
+    // Written with the first link of a new book, or by the owner of an existing link that has none yet.
+    match /folioCatalog/{bookId}/binding/owner {
+      allow read: if false;
+      allow create: if folioPublicationId(bookId)
+        && request.resource.data.keys().hasAll(['ownerUid', 'shareToken'])
+        && request.resource.data.keys().hasOnly(['ownerUid', 'shareToken'])
+        && folioPublicationOwner(request.resource.data.ownerUid)
+        && folioPublicationToken(request.resource.data.shareToken)
+        && getAfter(folioPublicationShare(bookId, request.resource.data.shareToken)).data.ownerUid == request.auth.uid
+        && getAfter(folioPublicationAuthorCopy(bookId)).data.shareToken == request.resource.data.shareToken;
+      allow update, delete: if false;
     }
 
     match /folioUsers/{uid}/owned/{bookId} {

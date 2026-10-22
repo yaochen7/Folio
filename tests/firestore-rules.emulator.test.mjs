@@ -137,6 +137,7 @@ async function read(uid, path, project = PROJECT) {
 const authorCopy = (uid, bookId = BOOK) => `folioUsers/${uid}/publications/${bookId}`;
 const share = (bookId = BOOK, token = TOKEN) => `folioCatalog/${bookId}/shares/${token}`;
 const part = (index, bookId = BOOK, token = TOKEN) => `${share(bookId, token)}/parts/${index}`;
+const binding = (bookId = BOOK) => `folioCatalog/${bookId}/binding/owner`;
 const range = (start, end) => Array.from({ length: Math.max(0, end - start) }, (_, index) => start + index);
 
 function head(uid, parts, { revision = 1, bookId = BOOK, ...overrides } = {}) {
@@ -145,12 +146,13 @@ function head(uid, parts, { revision = 1, bookId = BOOK, ...overrides } = {}) {
     description: 'A story by the sea.', category: 'Fiction', priceCents: 499, revision, partCount: parts.length, contentBytes, chapterCount: 1, wordCount: 3, ...overrides };
 }
 
-function publishWrites(uid, parts, { project = PROJECT, bookId = BOOK, token = TOKEN, headOverrides = {}, authorOverrides = {}, partOverrides = {} } = {}) {
+function publishWrites(uid, parts, { project = PROJECT, bookId = BOOK, token = TOKEN, headOverrides = {}, authorOverrides = {}, partOverrides = {}, bind = true } = {}) {
   const data = head(uid, parts, { bookId, ...headOverrides });
   return [
     set(project, authorCopy(uid, bookId), { ...data, shareToken: token, ...authorOverrides }, ['publishedAt', 'updatedAt']),
     set(project, share(bookId, token), data, ['publishedAt', 'updatedAt']),
     ...parts.map((text, index) => set(project, part(index, bookId, token), { bookId, ownerUid: uid, revision: 1, index, text, ...partOverrides })),
+    ...(bind ? [set(project, binding(bookId), { ownerUid: uid, shareToken: token })] : []),
   ];
 }
 
@@ -285,6 +287,40 @@ test('other accounts cannot edit heads or write, replace, or delete parts', { sk
   assert.equal((await read(null, part(1))).data.text, small[1]);
 });
 
+test('a book ID belongs to its first link: another account cannot add a link under it, before or after edits', { skip }, async () => {
+  await resetData();
+  const SHADOW = 'c'.repeat(64);
+  await denied(commit('user-a', publishWrites('user-a', small, { bind: false })), 'a publish without its binding');
+  await allowed(commit('user-a', publishWrites('user-a', small)), 'a publish with its binding');
+  // Someone who saw the link tries to add their own edition under the same book ID.
+  await denied(commit('user-b', publishWrites('user-b', small, { token: SHADOW, bind: false })), 'another account adding a link without a binding');
+  await denied(commit('user-b', publishWrites('user-b', small, { token: SHADOW })), 'another account adding a link and replacing the binding');
+  await denied(commit('user-b', [set(PROJECT, binding(), { ownerUid: 'user-b', shareToken: SHADOW })]), 'another account overwriting the binding');
+  await denied(commit('user-a', publishWrites('user-a', small, { token: SHADOW })), 'the owner adding a second link');
+  await denied(commit('user-a', [remove(PROJECT, binding())]), 'deleting the binding');
+  assert.equal((await read('user-a', binding())).status, 403, 'bindings are never readable');
+  assert.equal((await read(null, share(BOOK, SHADOW))).status, 404, 'no shadow link exists');
+  await denied(commit('recipient', [set(PROJECT, `folioUsers/recipient/owned/${BOOK}`, { bookId: BOOK, shareToken: SHADOW, source: 'shared' }, ['acquiredAt'])]), 'claiming a shadow link');
+  await allowed(commit('user-a', editWrites('user-a', small, 2, { headOverrides: { title: 'Still the owner' } })), 'the owner keeps editing');
+  await denied(commit('user-b', publishWrites('user-b', small, { token: SHADOW })), 'another account adding a link after an edit');
+});
+
+test('a link never claims more or less text than its parts hold, and trimmed parts cannot linger', { skip }, async () => {
+  await resetData();
+  const six = splitPublicationContent(manuscriptOfBytes(MAX_BOOK_BYTES));
+  await denied(commit('user-a', publishWrites('user-a', six, { headOverrides: { contentBytes: 3 } })), 'a head claiming 3 bytes over 5 MB of parts');
+  await denied(commit('user-a', publishWrites('user-a', small, { headOverrides: { contentBytes: utf8Bytes(small.join('')) + 1 } })), 'a head claiming one byte too many');
+  const overfull = Array.from({ length: MAX_PARTS }, () => 'x'.repeat(PART_BYTES));
+  await denied(commit('user-a', publishWrites('user-a', overfull, { headOverrides: { contentBytes: MAX_BOOK_BYTES } })), 'six full parts (6,000,000 bytes) claiming 5,000,000');
+  await allowed(commit('user-a', publishWrites('user-a', six)), 'an exact six-part publish');
+  const shorter = ['[{"title":"Opening","paragraphs":["Short."]}]'];
+  await denied(commit('user-a', editWrites('user-a', shorter, 2)), 'shrinking to one part without deleting parts 1 to 5');
+  await denied(commit('user-a', editWrites('user-a', shorter, 2, { previousParts: 3 })), 'shrinking and deleting only some of the trimmed parts');
+  await denied(commit('user-a', editWrites('user-a', shorter, 2, { previousParts: MAX_PARTS, headOverrides: { contentBytes: 3 } })), 'an edit claiming the wrong size');
+  await allowed(commit('user-a', editWrites('user-a', shorter, 2, { previousParts: MAX_PARTS })), 'shrinking with every trimmed part deleted');
+  for (const index of range(1, MAX_PARTS)) assert.equal((await read(null, part(index))).status, 404, `part ${index} is gone`);
+});
+
 test('legacy inline books stay readable and migrate to parts on their first edit', { skip }, async () => {
   await resetData();
   const legacy = { bookId: BOOK, ownerUid: 'user-a', title: 'An Older Book', author: 'Mara Ellison', genre: 'Fiction', kind: 'wild', kicker: 'An original story',
@@ -304,6 +340,11 @@ test('legacy inline books stay readable and migrate to parts on their first edit
   }
   assert.equal((await read(null, part(1))).data.text, small[1]);
   await allowed(commit('user-a', editWrites('user-a', small, 2)), 'a normal second edit');
+  // A book from before bindings is bound by its owner (the service does it after the migrating edit) or a backfill.
+  await denied(commit('user-b', [set(PROJECT, binding(), { ownerUid: 'user-b', shareToken: TOKEN })]), 'another account binding someone else\'s link');
+  await denied(commit('user-a', [set(PROJECT, binding(), { ownerUid: 'user-a', shareToken: 'c'.repeat(64) })]), 'binding to a link that does not exist');
+  await allowed(commit('user-a', [set(PROJECT, binding(), { ownerUid: 'user-a', shareToken: TOKEN })]), 'the owner binding an existing link');
+  await denied(commit('user-b', publishWrites('user-b', small, { token: 'c'.repeat(64) })), 'another account adding a link to a bound legacy book');
 });
 
 test('library, progress, owned, and catalog rules still behave', { skip }, async () => {

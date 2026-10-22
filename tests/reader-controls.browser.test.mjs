@@ -260,8 +260,8 @@ function scaleBook(id,{chapters:count,words},single=false){
  }
  return {starts,total:offset,book:{id,title:'Scale test',author:'Synthetic Author',genre:'Literary fiction',kind:'shape',kicker:'A novel',cover:'Scale',description:'Synthetic scale test.',category:'Fiction',chapters:single?[{title:'One long chapter',paragraphs:chapters.flatMap(c=>c.paragraphs)}]:chapters}};
 }
-async function scaleContext(browser,scale,{width,height},progress){
- const context=await browser.newContext({viewport:{width,height},hasTouch:width<900,isMobile:width<900,reducedMotion:'no-preference'});
+async function scaleContext(browser,scale,{width,height,reducedMotion='no-preference'},progress){
+ const context=await browser.newContext({viewport:{width,height},hasTouch:width<900,isMobile:width<900,reducedMotion});
  const books=await (await fetch(base+'js/books.js')).text();
  await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
  await context.route('**/js/books.js',route=>route.fulfill({contentType:'text/javascript; charset=utf-8',body:`${books}\nbooks.push(${JSON.stringify(scale.book)});\n`}));
@@ -310,8 +310,10 @@ test('a multi-MB book opens at once and keeps every word in place across chapter
    await page.locator('.fr-contents-toggle').click();
    await page.locator('.fr-chapter-list button').nth(chapter).click();
    let pages=await visibleWords(page);
-   assert.equal(pages[0][0],scale.starts[chapter],'Contents opens the chapter at its first word');
-   assert.equal(await page.locator('.fr-base .fr-page').first().locator('.fr-chapter-heading').textContent(),`Part ${chapter+1}`);
+   // In two-page view the chapter opening may be the right-hand page of its spread, as in print.
+   const opening=pages.findIndex(words=>words[0]===scale.starts[chapter]);
+   assert.ok(opening>=0,'Contents shows the page that starts the chapter at its first word');
+   assert.equal(await page.locator('.fr-base .fr-page').nth(opening).locator('.fr-chapter-heading').textContent(),`Part ${chapter+1}`);
    assert.equal(Number(await page.locator('.fr-progress-range').inputValue()),scale.starts[chapter],'the position stays a book-wide word offset');
    assertContiguous(pages,'a spread shows consecutive words');
    await settledTurn(page,'ArrowLeft');
@@ -319,7 +321,7 @@ test('a multi-MB book opens at once and keeps every word in place across chapter
    assert.equal(pages.at(-1).at(-1),scale.starts[chapter]-1,'turning back ends on the previous chapter’s last word');
    assertContiguous(pages,'the previous chapter’s pages are consecutive');
    await settledTurn(page,'ArrowRight');
-   assert.equal((await visibleWords(page))[0][0],scale.starts[chapter],'turning forward crosses back into the chapter');
+   assert.ok((await visibleWords(page)).some(words=>words[0]===scale.starts[chapter]),'turning forward crosses back into the chapter');
    for(let turn=0;turn<3;turn++){
     const before=(await visibleWords(page)).flat().at(-1);
     await settledTurn(page,'ArrowRight');
@@ -349,12 +351,16 @@ test('a multi-MB book opens at once and keeps every word in place across chapter
   await t.test('page numbers become exact without moving the reader',async()=>{
    const small=scaleBook('scale-small',{chapters:30,words:1200});
    const context=await scaleContext(browser,small,{width:1440,height:900}),page=await context.newPage();
-   await page.goto(base+'#read/scale-small');
+   // The book face is ready first, so the first estimate is measured with it rather than the fallback.
+   await page.goto(base+'#discover');await page.locator('.cover-button').first().waitFor();await page.evaluate(()=>document.fonts.load('19px Newsreader'));
+   await page.evaluate(()=>{location.hash='#read/scale-small';});
    await page.locator('.fr-book[aria-busy="false"] .fr-text').first().waitFor();
-   const first=(await visibleWords(page))[0][0];
+   const first=(await visibleWords(page))[0][0],estimate=(await page.locator('.fr-page-count').textContent()).match(/of about (\d+)/)?.[1];
    await page.waitForFunction(()=>/^Pages 1–2 of \d+$/.test(document.querySelector('.fr-page-count').textContent),null,{timeout:30000});
    assert.equal((await visibleWords(page))[0][0],first);
    const total=Number((await page.locator('.fr-page-count').textContent()).match(/of (\d+)/)[1]);
+   // A chapter opening on the first spread does not skew the first estimate.
+   if(estimate)assert.ok(Math.abs(Number(estimate)-total)<=total*.15,`the first estimate (${estimate}) is near the real total (${total})`);
    assert.ok(await page.evaluate(()=>[...document.querySelectorAll('.fr-base .fr-folio')].map(e=>e.textContent).join()==='1,2'),'folios fill in once known');
    await page.keyboard.press('End');
    assert.match(await page.locator('.fr-page-count').textContent(),new RegExp(`(^Page ${total}|–${total}) of ${total}$`),'the last page is the last page');
@@ -382,5 +388,93 @@ test('a multi-MB book opens at once and keeps every word in place across chapter
    }
    await context.close();
   });
+ }finally{await browser.close();}
+});
+
+// Every page's text fills it unless the next page opens a chapter or the book ends.
+const pageFill=page=>page.evaluate(()=>[...document.querySelectorAll('.fr-base .fr-page:not(.fr-empty-page)')].map(element=>{const body=element.querySelector('.fr-page-body'),last=body.lastElementChild,top=body.getBoundingClientRect().top;return last?(last.getBoundingClientRect().bottom-top)/body.clientHeight:0;}));
+async function walkBook(page,{limit=Infinity}={}){
+ const seen=[];
+ for(let turn=0;turn<limit;turn++){
+  const words=await visibleWords(page),fill=await pageFill(page),folios=await page.evaluate(()=>[...document.querySelectorAll('.fr-base .fr-page')].map(element=>element.querySelector('.fr-folio').textContent));
+  seen.push({words,fill,folios});
+  if(await page.locator('.fr-pages-left').textContent()==='End of story')break;
+  await settledTurn(page,'ArrowRight');
+ }
+ return seen;
+}
+
+test('a long chapter without headings is paginated like the print book: sections never leave short pages',async t=>{
+ const browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.BROWSER_EXECUTABLE?{executablePath:process.env.BROWSER_EXECUTABLE}:{})});
+ const book=scaleBook('one-chapter',{chapters:7,words:3300},true);
+ try{
+  await t.test('read from the start, every page is full and every word appears once',async()=>{
+   const context=await scaleContext(browser,book,{width:390,height:844,reducedMotion:'reduce'}),page=await context.newPage();
+   page.setDefaultTimeout(20000);await page.goto(base+'#read/one-chapter');await page.locator('.fr-book[aria-busy="false"] .fr-text').first().waitFor();
+   const pages=await walkBook(page);
+   assertContiguous(pages.map(item=>item.words.flat()),'no word is lost or repeated across section boundaries');
+   assert.equal(pages.at(-1).words.flat().at(-1),book.total-1);
+   const short=pages.slice(0,-1).map((item,index)=>[index+1,item.fill[0]]).filter(([,fill])=>fill<.8);
+   assert.deepEqual(short,[],'only the last page may be short');
+   await context.close();
+  });
+  await t.test('opened deep inside, a provisional section break is laid out again once the reader moves away',async()=>{
+   const offset=Math.floor(book.total*.62);
+   const context=await scaleContext(browser,book,{width:390,height:844,reducedMotion:'reduce'},{'one-chapter':{wordOffset:offset,fraction:.62,updatedAt:Date.now()}}),page=await context.newPage();
+   page.setDefaultTimeout(20000);await page.goto(base+'#read/one-chapter');await page.locator('.fr-book[aria-busy="false"] .fr-text').first().waitFor();
+   await page.waitForFunction(()=>/^Page \d+ of \d+$/.test(document.querySelector('.fr-page-count').textContent),null,{timeout:30000});
+   await page.keyboard.press('Home');
+   const pages=await walkBook(page);
+   assertContiguous(pages.map(item=>item.words.flat()),'every word appears once');
+   assert.deepEqual(pages.slice(0,-1).map((item,index)=>[index+1,item.fill[0]]).filter(([,fill])=>fill<.8),[],'no short page remains from the deep open');
+   await context.close();
+  });
+ }finally{await browser.close();}
+});
+
+test('two-page spreads pair odd and even pages however the reader gets there',async()=>{
+ const browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.BROWSER_EXECUTABLE?{executablePath:process.env.BROWSER_EXECUTABLE}:{})});
+ const book=scaleBook('spreads',{chapters:12,words:1300});
+ try{
+  const context=await scaleContext(browser,book,{width:1440,height:900}),page=await context.newPage();
+  page.setDefaultTimeout(20000);await page.goto(base+'#read/spreads');await page.locator('.fr-book[aria-busy="false"] .fr-text').first().waitFor();
+  await page.waitForFunction(()=>/^Pages 1–2 of \d+$/.test(document.querySelector('.fr-page-count').textContent),null,{timeout:30000});
+  const leftFolio=()=>page.evaluate(()=>Number(document.querySelector('.fr-base .fr-page-left .fr-folio').textContent));
+  for(let chapter=1;chapter<12;chapter++){
+   await openMenu(page);await page.locator('.fr-contents-toggle').click();await page.locator('.fr-chapter-list button').nth(chapter).click();
+   await page.waitForFunction(()=>!document.querySelector('.fr-book').classList.contains('fr-turning'));
+   assert.equal(await leftFolio()%2,1,`chapter ${chapter+1} opens in a spread that starts on an odd page`);
+   assert.ok((await visibleWords(page)).some(words=>words[0]===book.starts[chapter]));
+  }
+  await page.keyboard.press('Home');
+  for(let turn=0;turn<4;turn++){await settledTurn(page,'ArrowRight');assert.equal(await leftFolio()%2,1);}
+  for(let turn=0;turn<4;turn++){const before=await leftFolio();await settledTurn(page,'ArrowLeft');assert.equal(await leftFolio(),before-2,'turning back moves a whole spread');}
+  await page.keyboard.press('End');assert.equal(await leftFolio()%2,1,'End shows a spread that starts on an odd page');
+  // After a resize the new layout pairs spreads again once its page numbers are known.
+  await page.setViewportSize({width:1280,height:800});
+  await page.waitForFunction(()=>/^Pages? \d+(–\d+)? of \d+$/.test(document.querySelector('.fr-page-count').textContent),null,{timeout:30000});
+  await openMenu(page);await page.locator('.fr-contents-toggle').click();await page.locator('.fr-chapter-list button').nth(5).click();
+  assert.equal(await leftFolio()%2,1,'after a resize, Contents opens a spread that starts on an odd page');
+  await context.close();
+ }finally{await browser.close();}
+});
+
+test('text without spaces runs on across pages instead of being cut off',async()=>{
+ const browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.BROWSER_EXECUTABLE?{executablePath:process.env.BROWSER_EXECUTABLE}:{})});
+ const run='吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。何でも薄暗いじめじめした所でニャーニャー泣いていた事だけは記憶している。'.repeat(36);
+ const book={id:'no-spaces',title:'Without spaces',author:'Synthetic Author',genre:'Fiction',kind:'shape',kicker:'A novel',cover:'Spaces',description:'Long runs.',category:'Fiction',language:'ja',chapters:[{title:'一',paragraphs:['First paragraph.',run,'After the run.']}]};
+ try{
+  const context=await scaleContext(browser,{book},{width:390,height:844,reducedMotion:'reduce'}),page=await context.newPage();
+  await page.goto(base+'#read/no-spaces');await page.locator('.fr-book[aria-busy="false"] .fr-text').first().waitFor();
+  let text='';
+  for(let turn=0;turn<200;turn++){
+   const shown=await page.evaluate(()=>[...document.querySelectorAll('.fr-base .fr-page .fr-text')].map(element=>element.textContent));
+   assert.ok(await page.evaluate(()=>[...document.querySelectorAll('.fr-base .fr-page-body')].every(element=>element.scrollHeight<=element.clientHeight+1)),'no page hides text past its bottom');
+   text+=shown.join('\n')+'\n';
+   if(await page.locator('.fr-pages-left').textContent()==='End of story')break;
+   await settledTurn(page,'ArrowRight');
+  }
+  assert.equal(text.replace(/\n/g,''),'First paragraph.'+run+'After the run.','every character appears once, in order, with no spaces added');
+  await context.close();
  }finally{await browser.close();}
 });

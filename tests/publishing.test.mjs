@@ -97,6 +97,11 @@ test('the device keeps only book details per identity and migrates the old full-
  assert.deepEqual(readPublicationCache('reader-b',storage),[]);
  assert.equal(cachePublications('reader-a',[{...book,title:'Renamed'}],storage),true);
  assert.deepEqual(readPublicationCache('reader-a',storage).map(value=>value.title),['Renamed'],'a newer edition replaces the details');
+ const owned={...book,ownerUid:'author'};
+ cachePublications('reader-c',[{...owned,title:'Edition three',revision:3}],storage);cachePublications('reader-c',[{...owned,title:'Edition two',revision:2}],storage);
+ assert.deepEqual(readPublicationCache('reader-c',storage).map(value=>[value.title,value.revision]),[['Edition three',3]],'an older snapshot never brings back older details');
+ cachePublications('reader-c',[{...owned,shareToken:'c'.repeat(64),title:'Another link',revision:1}],storage);
+ assert.deepEqual(readPublicationCache('reader-c',storage).map(value=>value.title),['Another link'],'a different link is a different book, not an older edition');
  assert.equal(cachePublications('reader-a',[book],{getItem:()=>null,setItem(){throw new DOMException('Full.','QuotaExceededError');}}),false,'a full device reports false instead of throwing');
  const blocked={get length(){throw new DOMException('Blocked.','SecurityError');},getItem(){throw new DOMException('Blocked.','SecurityError');},setItem(){throw new DOMException('Blocked.','SecurityError');}};
  assert.deepEqual(readPublicationCache('reader-a',blocked),[]);assert.equal(cachePublications('reader-a',[book],blocked),false);assert.deepEqual(migrateLegacyPublications(blocked),[],'blocked site data never stops the app');

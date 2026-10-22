@@ -3,26 +3,16 @@ import { renderCover } from './books.js';
 import { curlShape, dragProgress, completesTurn, settleProgress } from './page-curl.js';
 import { createPageCurlRenderer } from './page-curl-renderer.js';
 import { createReadingControls } from './reader-controls.js';
+import { countWords, splitWords, joinWords, gapBefore } from './words.js';
 
 const STORAGE_KEY = 'folio.reader.settings.v1';
 const DEFAULT_SETTINGS = { fontSize: 19, theme: 'sepia', spread: true, tapToTurn: false };
 const THEMES = ['paper', 'sepia', 'night'];
-// A chapter longer than this is paginated as near-equal sections, each starting a page,
-// so opening deep inside a very long chapter never lays out everything before it.
+// A chapter longer than this is paginated as near-equal sections, so opening deep inside a very long
+// chapter never lays out everything before it. A section boundary is where pagination may start, not a
+// page break: once the page before it is laid out, the next section starts where that page ends.
 const SECTION_WORDS = 10000;
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
-const wordsOf = value => String(value || '').trim().split(/\s+/u).filter(Boolean);
-const isSpace = code => code === 32 || (code >= 9 && code <= 13) || code === 160 || code === 5760 || (code >= 8192 && code <= 8202) || code === 8232 || code === 8233 || code === 8239 || code === 8287 || code === 12288 || code === 65279;
-// The same count as wordsOf(text).length without building the words.
-function countWords(text) {
-  let count = 0, inWord = false;
-  for (let index = 0; index < text.length; index++) {
-    const code = text.charCodeAt(index), space = code > 32 && code < 160 ? false : isSpace(code);
-    if (!space && !inWord) count++;
-    inWord = !space;
-  }
-  return count;
-}
 // Two significant figures for page counts that are still estimates.
 function approximately(value, round = Math.round) {
   const step = 10 ** Math.max(0, Math.floor(Math.log10(Math.max(1, value))) - 1);
@@ -66,7 +56,9 @@ function normalizeBook(book) {
     chapter.paragraphs.forEach((paragraph, index) => {
       const done = paragraph.end - chapter.start;
       if (index < chapter.paragraphs.length - 1 && done < words * part / parts) return;
-      units.push({ chapterIndex, first, last: index, start: chapter.paragraphs[first].start, end: paragraph.end, opening: first === 0 });
+      let chars = 0;
+      for (let item = first; item <= index; item++) chars += chapter.paragraphs[item].text.length + 1;
+      units.push({ chapterIndex, first, last: index, start: chapter.paragraphs[first].start, end: paragraph.end, opening: first === 0, chars });
       first = index + 1;
       while (part < parts && done >= words * part / parts) part++;
     });
@@ -113,7 +105,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   let previewOnly = false;
   let backgroundHandle = 0, backgroundIdle = false, warmedNeighbours = false, fontPending = false;
   let fontTimer = 0, lastFontChange = -Infinity, searchTimer = 0, lastSearchInput = -Infinity;
-  let searchIndex = [], currentChapterButton = null;
+  let searchIndex = [], currentChapterButton = null, shownPages = [];
   const wordCache = new Map(), pageElements = new WeakMap(), measureRange = document.createRange();
 
   root.hidden = true;
@@ -204,7 +196,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   function paragraphWords(paragraph) {
     let words = wordCache.get(paragraph);
     if (words) wordCache.delete(paragraph);
-    else words = wordsOf(paragraph.text);
+    else words = splitWords(paragraph.text);
     wordCache.set(paragraph, words);
     if (wordCache.size > 96) wordCache.delete(wordCache.keys().next().value);
     return words;
@@ -225,7 +217,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     }
     const paragraph = document.createElement('p');
     paragraph.className = `fr-text${block.continued ? ' fr-continued' : ''}`;
-    const text = paragraphWords(normalized.chapters[block.chapterIndex].paragraphs[block.paragraph]).slice(block.from, block.to).join(' ');
+    const text = joinWords(paragraphWords(normalized.chapters[block.chapterIndex].paragraphs[block.paragraph]), block.from, block.to);
     if (!searchHighlight) paragraph.textContent = text;
     else {
       const lower = text.toLocaleLowerCase();
@@ -291,13 +283,58 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     while (low < high) { const middle = Math.ceil((low + high) / 2); if (normalized.chapters[middle].start <= offset) low = middle; else high = middle - 1; }
     return low;
   }
+  // A section starts where the page before it ended, once that page is laid out.
+  function unitStart(index) { return layout.units[index]?.start ?? normalized.units[index].start; }
   function unitForOffset(offset) {
     let low = 0, high = unitLimit() - 1;
-    while (low < high) { const middle = Math.ceil((low + high) / 2); if (normalized.units[middle].start <= offset) low = middle; else high = middle - 1; }
+    while (low < high) { const middle = Math.ceil((low + high) / 2); if (unitStart(middle) <= offset) low = middle; else high = middle - 1; }
     return low;
   }
   function unitState(index) {
-    return layout.units[index] ||= { pages: [], done: false, paragraph: normalized.units[index].first, consumed: 0 };
+    const unit = normalized.units[index];
+    return layout.units[index] ||= { pages: [], done: false, paragraph: unit.first, consumed: 0, start: unit.start, origin: [unit.first, 0] };
+  }
+  // Drops a unit's pages from `fromPage` on, so they are laid out again from where the page before ended.
+  function reopenUnit(index, fromPage) {
+    const state = layout.units[index];
+    if (!state || fromPage >= state.pages.length) return;
+    for (const page of state.pages.splice(fromPage)) countPage(page, -1);
+    [state.paragraph, state.consumed] = fromPage ? state.pages[fromPage - 1].stop : state.origin;
+    state.done = false;
+    layout.prefix.length = Math.min(layout.prefix.length, index + 1);
+    layout.scan = Math.min(layout.scan, index);
+    layout.id = ++layoutCount;
+  }
+  // The next section starts where a finished section's last page ended; pages it had from its nominal start
+  // (after a jump) are laid out again. paginateStep never moves a section whose pages are on screen.
+  function startUnitAt(index, paragraph, consumed) {
+    const state = unitState(index), start = normalized.chapters[normalized.units[index].chapterIndex].paragraphs[paragraph].start + consumed;
+    if (state.start === start) return;
+    reopenUnit(index, 0);
+    Object.assign(state, { paragraph, consumed, start, origin: [paragraph, consumed] });
+  }
+  const onScreen = index => shownPages.some(page => page?.unit === index);
+  // A section that had to end on a short page, because the next one was on screen, is laid out again
+  // once neither that page nor the next section is on screen.
+  function repairSections() {
+    for (const index of layout.pending) {
+      if (onScreen(index + 1) || shownPages.includes(layout.units[index].pages.at(-1))) continue;
+      layout.pending.delete(index);
+      reopenUnit(index + 1, 0);
+      reopenUnit(index, layout.units[index].pages.length - 1);
+    }
+  }
+  // Running totals for estimates, in characters, which vary less than words from page to page.
+  // Chapter openings hold less text, so they are counted apart.
+  function countPage(page, sign) {
+    if (page.blocks[0]?.type === 'heading') { layout.openingChars += page.chars * sign; layout.openingPages += sign; }
+    else { layout.pagedChars += page.chars * sign; layout.pagedPages += sign; }
+  }
+  // In two-page view, a spread starts on an odd page, as in print, whenever the page number is known.
+  function spreadStart(page) {
+    if (!spread || !page) return page;
+    const number = pageNumber(page);
+    return number !== null && number % 2 === 0 ? previousPage(page) || page : page;
   }
 
   // Pages are reached through their neighbours. Missing ones are paginated on demand unless
@@ -371,14 +408,21 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     const prefix = knownPrefix();
     return prefix.length > unitLimit() ? prefix[unitLimit()] : null;
   }
+  // Pages still to lay out, from each section's characters. Until a page without a heading is measured,
+  // a page's capacity comes from its size.
   function estimatedPages(untilUnit, offset = null) {
-    const wordsPerPage = layout.pagedWords / layout.pagedPages || 250;
+    const charsPerPage = Math.max(100, layout.pagedPages ? layout.pagedChars / layout.pagedPages : layout.metrics?.chars || 1500);
+    const openingShortfall = layout.openingPages ? clamp(1 - layout.openingChars / layout.openingPages / charsPerPage, 0, .9) : .4;
+    const pagesFor = (index, words) => { const unit = normalized.units[index]; return words * unit.chars / Math.max(1, unit.end - unit.start) / charsPerPage; };
     let count = 0;
     for (let index = 0; index < untilUnit; index++) {
       const state = layout.units[index], unit = normalized.units[index];
-      count += state?.done ? state.pages.length : (state?.pages.length || 0) + (unit.end - (state?.pages.at(-1)?.end ?? unit.start)) / wordsPerPage;
+      if (state?.done) { count += state.pages.length; continue; }
+      // A chapter's last page is part-filled, half a page on average.
+      const endsChapter = normalized.units[index + 1]?.opening !== false;
+      count += (state?.pages.length || 0) + pagesFor(index, unit.end - (state?.pages.at(-1)?.end ?? unitStart(index))) + (unit.opening && !state?.pages.length ? openingShortfall : 0) + (endsChapter ? .5 : 0);
     }
-    return offset === null ? count : count + (offset - normalized.units[untilUnit].start) / wordsPerPage;
+    return offset === null ? count : count + pagesFor(untilUnit, offset - unitStart(untilUnit));
   }
   function positionText(spoken = false) {
     const right = rightPage(), first = pageNumber(currentPage), last = right && pageNumber(right), total = totalPages();
@@ -413,6 +457,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     return paragraph;
   }
 
+  const before = (paragraph, consumed, [endParagraph, endConsumed]) => paragraph < endParagraph || paragraph === endParagraph && consumed < endConsumed;
   // Constant for a layout, so they are read once rather than at every page break.
   function pageMetrics() {
     if (!layout.metrics) {
@@ -429,7 +474,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   function fittingWords(item, metrics) {
     const node = item.element.firstChild, ends = [];
     let offset = 0;
-    for (let index = item.from; index < item.to; index++) { offset += item.words[index].length; ends.push(offset); offset++; }
+    for (let index = item.from; index < item.to; index++) { if (index > item.from) offset += gapBefore(item.words, index); offset += item.words[index].length; ends.push(offset); }
     const fits = count => {
       const end = ends[count - 1], code = node.data.charCodeAt(end - 1);
       measureRange.setStart(node, end - (code >= 0xdc00 && code <= 0xdfff && end > 1 ? 2 : 1));
@@ -446,7 +491,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     let low = 0, high = max;
     while (low < high) {
       const middle = Math.ceil((low + high) / 2);
-      item.element.textContent = item.words.slice(item.from, item.from + middle).join(' ');
+      item.element.textContent = joinWords(item.words, item.from, item.from + middle);
       if (fitsMeasure()) low = middle;
       else high = middle - 1;
     }
@@ -458,6 +503,12 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   function paginateStep(unitIndex) {
     const unit = normalized.units[unitIndex], state = unitState(unitIndex), metrics = pageMetrics();
     const chapter = normalized.chapters[unit.chapterIndex], paragraphs = chapter.paragraphs;
+    // A section ends where the next section of its chapter starts. While that section's pages are on screen it
+    // stays put; otherwise a page that reaches the end with room left continues into it, leaving at least its
+    // last paragraph to start its own pages. Cursors are [paragraph, words into it].
+    const following = unitIndex + 1 < unitLimit() && !normalized.units[unitIndex + 1].opening ? normalized.units[unitIndex + 1] : null;
+    const fixed = following && layout.units[unitIndex + 1]?.pages.length && onScreen(unitIndex + 1) ? layout.units[unitIndex + 1].origin : null;
+    const ownEnd = fixed || [unit.last + 1, 0], spillEnd = !fixed && following && following.last > following.first ? [following.last, 0] : ownEnd;
     const pageData = { unit: unitIndex, index: state.pages.length, chapterIndex: unit.chapterIndex, start: paragraphs[state.paragraph].start + state.consumed, end: 0, blocks: [] };
     measureBody.replaceChildren();
     let heading = null;
@@ -466,23 +517,26 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       measureBody.append(heading);
     }
     const items = [];
-    let next = state.paragraph, from = state.consumed, budget = metrics.chars * 1.15, used = 0, fits;
+    let next = state.paragraph, from = state.consumed, budget = metrics.chars * 1.15, used = 0, fits, end = ownEnd;
     for (;;) {
-      while (next <= unit.last && used < budget) {
-        const words = paragraphWords(paragraphs[next]), open = items.at(-1)?.paragraph === next ? items.at(-1) : null;
+      while (before(next, from, end) && used < budget) {
+        const words = paragraphWords(paragraphs[next]), allowed = next === end[0] ? end[1] : words.length, open = items.at(-1)?.paragraph === next ? items.at(-1) : null;
         // Long paragraphs are appended in pieces; greedy line breaking lays out a prefix the same way.
         const limit = budget - used + 1500;
         let to = open ? open.to : from, chars = 0;
-        if (!open && !from && paragraphs[next].text.length <= limit) { to = words.length; chars = paragraphs[next].text.length; }
-        else while (to < words.length && chars < limit) chars += words[to++].length + 1;
+        if (!open && !from && allowed === words.length && paragraphs[next].text.length <= limit) { to = words.length; chars = paragraphs[next].text.length; }
+        else while (to < allowed && chars < limit) chars += words[to++].length + 1;
         used += chars;
-        if (open) { open.to = to; open.element.textContent = words.slice(open.from, to).join(' '); }
-        else { const element = measureParagraph(words.slice(from, to).join(' '), from > 0); measureBody.append(element); items.push({ element, paragraph: next, words, from, to }); }
-        if (to < words.length) break;
+        if (open) { open.to = to; open.element.textContent = joinWords(words, open.from, to); }
+        else { const element = measureParagraph(joinWords(words, from, to), from > 0); measureBody.append(element); items.push({ element, paragraph: next, words, from, to }); }
+        if (to < allowed) break;
+        // The section's text ends inside this paragraph.
+        if (allowed < words.length) { from = allowed; break; }
         next++; from = 0;
       }
       fits = fitsMeasure();
-      if (!fits || next > unit.last) break;
+      if (!fits) break;
+      if (!before(next, from, end)) { if (end === spillEnd) break; end = spillEnd; }
       budget = Math.max(budget, used) + metrics.chars * .5;
     }
     if (!fits && heading && heading.getBoundingClientRect().bottom > metrics.bottom) {
@@ -496,7 +550,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       while (low < high) { const middle = (low + high) >> 1; if (items[middle].element.getBoundingClientRect().bottom > metrics.bottom) high = middle; else low = middle + 1; }
       placed = low;
       const item = items[low], hasText = low > 0;
-      const show = words => { item.element.textContent = item.words.slice(item.from, item.from + words).join(' '); };
+      const show = words => { item.element.textContent = joinWords(item.words, item.from, item.from + words); };
       count = fittingWords(item, metrics);
       items.slice(low + 1).forEach(other => other.element.remove());
       if (count) { show(count); if (!fitsMeasure()) { count = fittingWordsByLayout(item, count - 1); show(count); } }
@@ -513,11 +567,16 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     }
     pageData.blocks.unshift(...items.slice(0, placed).map(item => ({ type: 'paragraph', chapterIndex: unit.chapterIndex, paragraph: item.paragraph, from: item.from, to: item.to, continued: item.from > 0 })));
     if (heading) pageData.blocks.unshift({ type: 'heading', chapterIndex: unit.chapterIndex });
-    state.paragraph = next; state.consumed = from; state.done = next > unit.last;
-    pageData.end = state.done ? unit.end : paragraphs[next].start + from;
+    state.paragraph = next; state.consumed = from; state.done = !before(next, from, ownEnd);
+    pageData.end = next < paragraphs.length ? paragraphs[next].start + from : unit.end;
+    pageData.stop = [next, from];
+    pageData.chars = measureBody.textContent.length;
     state.pages.push(pageData);
-    layout.pagedWords += pageData.end - pageData.start; layout.pagedPages++;
+    countPage(pageData, 1);
     if (!state.done) metrics.chars = metrics.chars * .6 + measureBody.textContent.length * .4;
+    else if (following && !fixed) startUnitAt(unitIndex + 1, next, from);
+    // A last page with room left that had to stop for a section on screen is laid out again later.
+    else if (fixed && fits) layout.pending.add(unitIndex);
     return pageData;
   }
 
@@ -541,7 +600,9 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   }
 
   function renderBase() {
-    bookElement.replaceChildren(buildBase());
+    const right = rightPage();
+    shownPages = [currentPage, right];
+    bookElement.replaceChildren(buildBase(currentPage, right));
     bookElement.classList.remove('fr-turning');
     bookElement.setAttribute('aria-busy', 'false');
     curlRenderer?.hide();
@@ -555,6 +616,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     const chapter = normalized.chapters[chapterIndex];
     const right = rightPage(), atEnd = !canTurn(1), first = pageNumber(currentPage), total = totalPages();
     layout.precision = `${first !== null}:${total !== null}`;
+    layout.shownEstimate = total === null ? estimatedPages(unitLimit()) : null;
     chapterElement.textContent = chapter.title;
     chapterElement.setAttribute('aria-label', `Contents, current chapter ${chapter.title}`);
     pageCountElement.textContent = !chromeVisible ? String(first ?? '') : positionText();
@@ -638,10 +700,10 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     if (force) layouts.delete(geometry.key);
     layout = layouts.get(geometry.key);
     if (layout) layouts.delete(geometry.key);
-    else layout = { id: ++layoutCount, units: [], prefix: [0], scan: 0, pagedWords: 0, pagedPages: 0, metrics: null, precision: '' };
+    else layout = { id: ++layoutCount, units: [], prefix: [0], scan: 0, pagedChars: 0, pagedPages: 0, openingChars: 0, openingPages: 0, metrics: null, precision: '', shownEstimate: null, pending: new Set() };
     layouts.set(geometry.key, layout);
     while (layouts.size > 4) layouts.delete(layouts.keys().next().value);
-    currentPage = pageForOffset(anchorOffset);
+    currentPage = spreadStart(pageForOffset(anchorOffset));
     renderBase();
     updateChrome();
     emitProgress();
@@ -681,16 +743,18 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     const geometry = measureGeometry();
     if (geometry?.key !== lastMeasureKey) { if (geometry) onResize(); else scheduleBackground(500); return; }
     const until = performance.now() + clamp(deadline?.timeRemaining?.() ?? 10, 4, 12);
+    repairSections();
     let index;
     while ((index = backgroundUnit()) !== -1) {
       paginateStep(index);
       if (performance.now() >= until) break;
     }
     let waiting = false;
-    if (`${pageNumber(currentPage) !== null}:${totalPages() !== null}` !== layout.precision) {
-      // Newly exact numbers refresh the labels, though not under a reader using the slider.
+    const estimate = layout.shownEstimate, drifted = estimate !== null && totalPages() === null && Math.abs(estimatedPages(unitLimit()) - estimate) > estimate * .05;
+    if (`${pageNumber(currentPage) !== null}:${totalPages() !== null}` !== layout.precision || drifted) {
+      // Newly exact numbers or a better estimate refresh the labels, though not under a reader using the slider.
       if (document.activeElement === range) waiting = true;
-      else { updateChrome(); refreshFolios(); }
+      else { updateChrome(); refreshFolios(); warmedNeighbours = false; warmPages(); }
     }
     if (!warmedNeighbours && [1, -1].every(direction => !canTurn(direction) || turnTarget(direction, false))) { warmedNeighbours = true; warmPages(); }
     if (index !== -1 || waiting) scheduleBackground(index === -1 ? 500 : 0);
@@ -840,10 +904,10 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
         if (index < 0) continue;
         count++;
         if (count > 40) continue;
-        const paragraph = chapter.paragraphs[paragraphIndex], text = paragraphWords(paragraph).join(' ');
-        // The match's own word: one space separates each word.
+        const paragraph = chapter.paragraphs[paragraphIndex], words = paragraphWords(paragraph), text = joinWords(words);
+        // The match's own word: the words before it, separated as on the page.
         let offset = paragraph.start;
-        for (let space = text.indexOf(' '); space !== -1 && space < index; space = text.indexOf(' ', space + 1)) offset++;
+        for (let word = 0, position = 0; word < words.length; word++) { position += (word ? gapBefore(words, word) : 0) + words[word].length; if (position > index) { offset = paragraph.start + word; break; } }
         const item = document.createElement('li'), button = document.createElement('button');
         button.type = 'button'; button.dataset.frAction = 'search-result'; button.dataset.frOffset = String(offset);
         const title = document.createElement('strong'); title.textContent = chapter.title;
@@ -860,7 +924,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   }
 
   // Lowercase text with single spaces between words, built once per opened book: in idle
-  // time while the search panel is open, and finished by the first search if need be.
+  // time from when the reading tools open, and finished by the first search if need be.
   function indexChapter() {
     searchIndex.push(normalized.chapters[searchIndex.length].paragraphs.map(paragraph => paragraph.text.replace(/\s+/gu, ' ').trim().toLocaleLowerCase()));
   }
@@ -868,7 +932,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     const index = searchIndex, chapters = previewOnly ? 1 : normalized.chapters.length;
     if (index.length >= chapters) return;
     (window.requestIdleCallback || setTimeout)(() => {
-      if (!isOpen || index !== searchIndex || searchPanel.hidden) return;
+      if (!isOpen || index !== searchIndex) return;
       const until = performance.now() + 8;
       while (index.length < chapters && performance.now() < until) indexChapter();
       prepareSearch();
@@ -1040,7 +1104,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     settleLayout();
     abortTurn();
     anchorOffset = clamp(Number(offset) || 0, 0, Math.max(0, accessibleWords() - 1));
-    currentPage = pageForOffset(anchorOffset);
+    currentPage = spreadStart(pageForOffset(anchorOffset));
     renderBase();
     if(!keepPanel)closePanels();
     updateChrome(announce);
@@ -1054,7 +1118,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     const action = button.dataset.frAction;
     if (action === 'close') close();
     else if(action==='menu'){
-      const show=!controls.expanded;closePanels();setChrome(true);controls.setExpanded(show);
+      const show=!controls.expanded;closePanels();setChrome(true);controls.setExpanded(show);if(show)prepareSearch();
       previewButton.inert = show;
       if(show&&event.detail===0)root.querySelector('.fr-contents-toggle')?.focus({preventScroll:true});
     }
@@ -1370,7 +1434,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     curlRenderer?.dispose(); curlRenderer = null; curlUnavailable = false;
     clearTimeout(resizeTimer); clearTimeout(fontTimer); clearTimeout(searchTimer); resizeTimer = fontTimer = 0;
     cancelBackground();
-    layouts.clear(); layout = null; currentPage = null; searchIndex = []; wordCache.clear();
+    layouts.clear(); layout = null; currentPage = null; shownPages = []; searchIndex = []; wordCache.clear();
     closePanels();
     root.hidden = true;
     controls.unmount();

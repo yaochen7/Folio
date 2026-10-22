@@ -4,6 +4,7 @@ import {MAX_BOOK_BYTES,MAX_CHAPTERS,MAX_PARAGRAPHS_PER_CHAPTER,MAX_PARAGRAPH_CHA
 export const COVER_STYLES=['shape','atlas','blue-hour','wild','slowly','tomorrow'];
 export const CATEGORIES=['Fiction','Ideas','Escape'];
 const bookId=/^b-[a-f0-9-]{36}$/;
+export const isPublicationId=id=>typeof id==='string'&&bookId.test(id);
 const identity=uid=>uid?'user.'+encodeURIComponent(uid):'guest';
 const LEGACY_PREFIX='folio.books.v1.',CACHE_PREFIX='folio.books.v2.';
 // Book text lives in book-store.js; localStorage keeps only the small details that list a book.
@@ -72,7 +73,7 @@ function cleanChapters(value){
 export function decoratePublication(value){
  if(!value||!bookId.test(value.id)||typeof value.title!=='string'||typeof value.author!=='string')return null;
  const {chapters:source,...details}=value,title=value.title.slice(0,160);
- const book={...details,title,author:value.author.slice(0,100),description:String(value.description||'').slice(0,1500),genre:String(value.genre||'Fiction').slice(0,80),category:['Fiction','Ideas','Escape'].includes(value.category)?value.category:'Fiction',kind:COVER_STYLES.includes(value.kind)?value.kind:'shape',kicker:'A Folio book',cover:esc(title),revision:wholeNumber(value.revision)?value.revision:0};
+ const book={...details,title,author:value.author.slice(0,100),description:String(value.description||'').slice(0,1500),genre:String(value.genre||'Fiction').slice(0,80),category:CATEGORIES.includes(value.category)?value.category:'Fiction',kind:COVER_STYLES.includes(value.kind)?value.kind:'shape',kicker:'A Folio book',cover:esc(title),revision:wholeNumber(value.revision)?value.revision:0};
  if(!wholeNumber(book.wordCount))delete book.wordCount;
  if(source===undefined)return book;
  const chapters=cleanChapters(source);if(!chapters)return null;
@@ -81,10 +82,12 @@ export function decoratePublication(value){
 }
 export const publicationDetails=book=>{const {chapters,...details}=book||{};return details;};
 
+/** True when `known` is a newer edition of the same link than `incoming`, so its details stay. */
+export const newerEdition=(known,incoming)=>Boolean(known&&incoming&&known.id===incoming.id&&known.ownerUid===incoming.ownerUid&&known.shareToken===incoming.shareToken&&(known.revision||0)>(incoming.revision||0));
 function writeCache(storage,key,books){
  const merged=new Map();
  try{const values=JSON.parse(storage.getItem(key)||'[]');if(Array.isArray(values))for(const value of values){const book=decoratePublication(value);if(book)merged.set(book.id,publicationDetails(book));}}catch{}
- for(const book of books)merged.set(book.id,publicationDetails(book));
+ for(const book of books)if(!newerEdition(merged.get(book.id),book))merged.set(book.id,publicationDetails(book));
  storage.setItem(key,JSON.stringify([...merged.values()]));
 }
 // Storage is resolved inside try: reading globalThis.localStorage throws where site data is blocked.

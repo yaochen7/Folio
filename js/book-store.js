@@ -19,12 +19,12 @@ export function createBookStore({indexedDB:factory,timeout=2000,now=Date.now}={}
    request.onerror=()=>finish(null);
   });
  }
- async function run(name,mode,operation){
+ async function run(name,mode,operation,{commit=mode==='readwrite'}={}){
   const db=await open();if(!db)return {ok:false};
   return new Promise(resolve=>{
    let transaction,value;
    // Committing at once gives a write made while the page is hiding its best chance to land.
-   try{transaction=db.transaction(name,mode);const request=operation(transaction.objectStore(name));if(request)request.onsuccess=()=>{value=request.result;};if(mode==='readwrite')transaction.commit?.();}
+   try{transaction=db.transaction(name,mode);const request=operation(transaction.objectStore(name));if(request)request.onsuccess=()=>{value=request.result;};if(commit)transaction.commit?.();}
    catch(error){resolve({ok:false,error});return;}
    transaction.oncomplete=()=>resolve({ok:true,value});
    transaction.onabort=()=>resolve({ok:false,error:transaction.error});
@@ -42,21 +42,32 @@ export function createBookStore({indexedDB:factory,timeout=2000,now=Date.now}={}
  // Resolves true only when the value is kept on this device; false leaves it in memory for this visit.
  async function write(name,key,value){
   let result=await run(name,'readwrite',store=>store.put(value,key));
-  // Cached books can be downloaded again, so a full device makes room by forgetting them.
-  if(!result.ok&&name===CONTENT&&result.error?.name==='QuotaExceededError')result=await run(name,'readwrite',store=>{store.clear();return store.put(value,key);});
+  // Cached books can be downloaded again and drafts cannot, so a full device makes room by forgetting books.
+  if(!result.ok&&result.error?.name==='QuotaExceededError'){
+   if(name===CONTENT)result=await run(name,'readwrite',store=>{store.clear();return store.put(value,key);});
+   else if((await run(CONTENT,'readwrite',store=>store.clear())).ok)result=await run(name,'readwrite',store=>store.put(value,key));
+  }
   if(result.ok){memory[name].delete(key);return true;}
   keep(name,key,value);return false;
  }
  async function remove(name,key){memory[name].delete(key);return (await run(name,'readwrite',store=>store.delete(key))).ok;}
+ // Read, compare and delete in one transaction, so a draft another tab saved in between is kept.
+ async function removeIf(name,key,keep){
+  if(memory[name].has(key)){if(keep(memory[name].get(key)))return false;memory[name].delete(key);}
+  let removed=false;
+  const result=await run(name,'readwrite',store=>{const request=store.get(key);request.onsuccess=()=>{if(request.result!==undefined&&!keep(request.result)){store.delete(key);removed=true;}};},{commit:false});
+  return result.ok&&removed;
+ }
  return {
   async getContent(bookId){const value=await read(CONTENT,bookId);return validContent(value)&&value.bookId===bookId?{revision:value.revision,book:value.book}:null;},
   putContent(bookId,{revision,book}={}){
    const value={bookId,revision,book,savedAt:now()};
    return validContent(value)&&typeof bookId==='string'?write(CONTENT,bookId,value):Promise.resolve(false);
   },
-  deleteContent:bookId=>remove(CONTENT,bookId),
   async getDraft(key){const value=await read(DRAFTS,key);return value&&typeof value==='object'?value:null;},
   putDraft:(key,draft)=>draft&&typeof draft==='object'?write(DRAFTS,key,draft):Promise.resolve(false),
-  deleteDraft:key=>remove(DRAFTS,key)
+  deleteDraft:key=>remove(DRAFTS,key),
+  /** Deletes the draft only while `matches(draft)` holds for what is stored now. Resolves true when it was deleted. */
+  deleteDraftIf:(key,matches)=>removeIf(DRAFTS,key,value=>!(value&&typeof value==='object'&&matches(value)))
  };
 }
