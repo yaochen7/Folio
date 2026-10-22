@@ -248,3 +248,139 @@ test('one liquid reader button exposes working, accessible controls',async t=>{
   });
  }finally{await browser.close();}
 });
+
+// A deterministic multi-MB manuscript: every word names its own offset ("w" + base 36), so a
+// page shows exactly which words it holds.
+function scaleBook(id,{chapters:count,words},single=false){
+ let seed=7,offset=0;const random=()=>(seed=seed*16807%2147483647)/2147483647,chapters=[],starts=[];
+ for(let c=0;c<count;c++){
+  const paragraphs=[];starts.push(offset);
+  for(let total=0;total<words;){const length=random()<.3?8+Math.floor(random()*22):30+Math.floor(random()*120),tokens=[];for(let i=0;i<length;i++)tokens.push('w'+(offset++).toString(36));paragraphs.push(tokens.join(' ')+'.');total+=length;}
+  chapters.push({title:`Part ${c+1}`,paragraphs});
+ }
+ return {starts,total:offset,book:{id,title:'Scale test',author:'Synthetic Author',genre:'Literary fiction',kind:'shape',kicker:'A novel',cover:'Scale',description:'Synthetic scale test.',category:'Fiction',chapters:single?[{title:'One long chapter',paragraphs:chapters.flatMap(c=>c.paragraphs)}]:chapters}};
+}
+async function scaleContext(browser,scale,{width,height},progress){
+ const context=await browser.newContext({viewport:{width,height},hasTouch:width<900,isMobile:width<900,reducedMotion:'no-preference'});
+ const books=await (await fetch(base+'js/books.js')).text();
+ await context.route('**/firebase-config.json',route=>route.fulfill({json:{}}));
+ await context.route('**/js/books.js',route=>route.fulfill({contentType:'text/javascript; charset=utf-8',body:`${books}\nbooks.push(${JSON.stringify(scale.book)});\n`}));
+ await context.addInitScript(progress=>{
+  localStorage.setItem('folio.demo-membership.v1.guest',JSON.stringify({demo:true,planId:'monthly',startedAt:Date.now(),expiresAt:Date.now()+86400000,renew:true,receiptId:'FOLIO-DEMO-reader-fixture'}));
+  if(progress)localStorage.setItem('folio.library.v1.guest',JSON.stringify({saved:[],progress,mutations:{}}));
+ },progress);
+ return context;
+}
+// The offsets on each visible page, left to right.
+const visibleWords=page=>page.evaluate(()=>[...document.querySelectorAll('.fr-base .fr-page')].map(element=>[...element.querySelectorAll('.fr-text')].flatMap(p=>(p.textContent.match(/\bw[0-9a-z]+\b/g)||[]).map(token=>parseInt(token.slice(1),36)))));
+async function openTimed(page,id){
+ return page.evaluate(async id=>{
+  const started=performance.now();location.hash='#read/'+id;
+  await new Promise(resolve=>{const check=()=>document.querySelector('.fr-book[aria-busy="false"] .fr-page .fr-text')?requestAnimationFrame(()=>resolve()):requestAnimationFrame(check);requestAnimationFrame(check);});
+  return performance.now()-started;
+ },id);
+}
+async function settledTurn(page,key){
+ await page.keyboard.press(key);
+ await page.waitForFunction(()=>!document.querySelector('.fr-book').classList.contains('fr-turning')&&document.querySelector('.fr-book').getAttribute('aria-busy')==='false');
+}
+function assertContiguous(pages,message){
+ const words=pages.flat();
+ assert.ok(words.length&&words.every((word,index)=>!index||word===words[index-1]+1),message);
+}
+
+test('a multi-MB book opens at once and keeps every word in place across chapters',async t=>{
+ const browser=await chromium.launch({headless:true,args:['--no-sandbox'],...(process.env.BROWSER_EXECUTABLE?{executablePath:process.env.BROWSER_EXECUTABLE}:{})});
+ const scale=scaleBook('scale',{chapters:240,words:3300});
+ try{
+  for(const viewport of [{width:1440,height:900},{width:390,height:844}])await t.test(String(viewport.width),async()=>{
+   const context=await scaleContext(browser,scale,viewport),page=await context.newPage(),errors=[];
+   page.on('pageerror',error=>errors.push(error.message));
+   page.setDefaultTimeout(20000);
+   await page.goto(base+'#discover');
+   await page.locator('.cover-button').first().waitFor();
+   await page.evaluate(()=>document.fonts.load('19px Newsreader'));
+   const elapsed=await openTimed(page,'scale');
+   // Laying out the whole book first took 15 s or more at this size.
+   assert.ok(elapsed<2500,`first page in ${Math.round(elapsed)} ms`);
+   assert.match(await page.locator('.fr-page-count').textContent(),/^Pages? 1(–2)? of /);
+   assert.deepEqual((await visibleWords(page))[0].slice(0,3),[0,1,2]);
+   const spread=viewport.width>=900,chapter=150;
+   await openMenu(page);
+   await page.locator('.fr-contents-toggle').click();
+   await page.locator('.fr-chapter-list button').nth(chapter).click();
+   let pages=await visibleWords(page);
+   assert.equal(pages[0][0],scale.starts[chapter],'Contents opens the chapter at its first word');
+   assert.equal(await page.locator('.fr-base .fr-page').first().locator('.fr-chapter-heading').textContent(),`Part ${chapter+1}`);
+   assert.equal(Number(await page.locator('.fr-progress-range').inputValue()),scale.starts[chapter],'the position stays a book-wide word offset');
+   assertContiguous(pages,'a spread shows consecutive words');
+   await settledTurn(page,'ArrowLeft');
+   pages=await visibleWords(page);
+   assert.equal(pages.at(-1).at(-1),scale.starts[chapter]-1,'turning back ends on the previous chapter’s last word');
+   assertContiguous(pages,'the previous chapter’s pages are consecutive');
+   await settledTurn(page,'ArrowRight');
+   assert.equal((await visibleWords(page))[0][0],scale.starts[chapter],'turning forward crosses back into the chapter');
+   for(let turn=0;turn<3;turn++){
+    const before=(await visibleWords(page)).flat().at(-1);
+    await settledTurn(page,'ArrowRight');
+    assert.equal((await visibleWords(page))[0][0],before+1,'no word is skipped or repeated between turns');
+   }
+   assert.ok(await page.evaluate(()=>[...document.querySelectorAll('.fr-base .fr-page-body')].every(e=>e.scrollHeight<=e.clientHeight+1)));
+   await page.keyboard.press('End');
+   pages=await visibleWords(page);
+   assert.equal(pages.flat().at(-1),scale.total-1,'End shows the book’s last word');
+   assert.equal(await page.locator('.fr-pages-left').textContent(),'End of story');
+   await page.keyboard.press('Home');
+   assert.equal((await visibleWords(page))[0][0],0);
+   // Search reaches words far beyond the measured pages and opens their page.
+   const wanted=scale.starts[200]+57;
+   await openMenu(page);
+   await page.locator('.fr-search-toggle').click();
+   await page.locator('.fr-book-search').fill('w'+wanted.toString(36));
+   assert.equal(await page.locator('.fr-search-results button').count(),1);
+   await page.locator('.fr-search-results button').click();
+   pages=await visibleWords(page);
+   assert.ok(pages[0][0]<=wanted&&pages.flat().includes(wanted),'a search result opens the page holding the match');
+   assert.equal(await page.locator('.fr-base mark').count(),1);
+   if(spread)assert.equal(await page.locator('.fr-book').evaluate(e=>e.classList.contains('fr-is-spread')),true);
+   assert.deepEqual(errors,[]);
+   await context.close();
+  });
+  await t.test('page numbers become exact without moving the reader',async()=>{
+   const small=scaleBook('scale-small',{chapters:30,words:1200});
+   const context=await scaleContext(browser,small,{width:1440,height:900}),page=await context.newPage();
+   await page.goto(base+'#read/scale-small');
+   await page.locator('.fr-book[aria-busy="false"] .fr-text').first().waitFor();
+   const first=(await visibleWords(page))[0][0];
+   await page.waitForFunction(()=>/^Pages 1–2 of \d+$/.test(document.querySelector('.fr-page-count').textContent),null,{timeout:30000});
+   assert.equal((await visibleWords(page))[0][0],first);
+   const total=Number((await page.locator('.fr-page-count').textContent()).match(/of (\d+)/)[1]);
+   assert.ok(await page.evaluate(()=>[...document.querySelectorAll('.fr-base .fr-folio')].map(e=>e.textContent).join()==='1,2'),'folios fill in once known');
+   await page.keyboard.press('End');
+   assert.match(await page.locator('.fr-page-count').textContent(),new RegExp(`(^Page ${total}|–${total}) of ${total}$`),'the last page is the last page');
+   await page.locator('.fr-appearance-panel [data-fr-action="larger"]').evaluate(button=>button.click());
+   assert.equal((await visibleWords(page)).flat().at(-1),small.total-1,'a new text size keeps the reader on the last words');
+   await context.close();
+  });
+  await t.test('a very long chapter resumes deep inside without laying out what comes before',async()=>{
+   const long=scaleBook('scale-long',{chapters:160,words:3300},true),offset=Math.floor(long.total*.73);
+   const context=await scaleContext(browser,long,{width:390,height:844},{'scale-long':{wordOffset:offset,fraction:.73,updatedAt:Date.now()}});
+   const page=await context.newPage();
+   page.setDefaultTimeout(20000);
+   await page.goto(base+'#discover');
+   await page.locator('.cover-button').first().waitFor();
+   const elapsed=await openTimed(page,'scale-long');
+   assert.ok(elapsed<2500,`resumed page in ${Math.round(elapsed)} ms`);
+   let pages=await visibleWords(page);
+   assert.ok(pages[0][0]<=offset&&pages[0].at(-1)>=offset,'the saved word is on the page');
+   assert.equal(Number(await page.locator('.fr-progress-range').inputValue()),offset);
+   assert.match(await page.locator('.fr-page-count').textContent(),/about/i,'an estimated page number says so');
+   for(let turn=0;turn<6;turn++){
+    const first=(await visibleWords(page))[0][0];
+    await settledTurn(page,'ArrowLeft');
+    assert.equal((await visibleWords(page))[0].at(-1),first-1,'turning back never skips words');
+   }
+   await context.close();
+  });
+ }finally{await browser.close();}
+});

@@ -7,8 +7,27 @@ import { createReadingControls } from './reader-controls.js';
 const STORAGE_KEY = 'folio.reader.settings.v1';
 const DEFAULT_SETTINGS = { fontSize: 19, theme: 'sepia', spread: true, tapToTurn: false };
 const THEMES = ['paper', 'sepia', 'night'];
+// A chapter longer than this is paginated as near-equal sections, each starting a page,
+// so opening deep inside a very long chapter never lays out everything before it.
+const SECTION_WORDS = 10000;
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const wordsOf = value => String(value || '').trim().split(/\s+/u).filter(Boolean);
+const isSpace = code => code === 32 || (code >= 9 && code <= 13) || code === 160 || code === 5760 || (code >= 8192 && code <= 8202) || code === 8232 || code === 8233 || code === 8239 || code === 8287 || code === 12288 || code === 65279;
+// The same count as wordsOf(text).length without building the words.
+function countWords(text) {
+  let count = 0, inWord = false;
+  for (let index = 0; index < text.length; index++) {
+    const code = text.charCodeAt(index), space = code > 32 && code < 160 ? false : isSpace(code);
+    if (!space && !inWord) count++;
+    inWord = !space;
+  }
+  return count;
+}
+// Two significant figures for page counts that are still estimates.
+function approximately(value, round = Math.round) {
+  const step = 10 ** Math.max(0, Math.floor(Math.log10(Math.max(1, value))) - 1);
+  return Math.max(1, round(value / step) * step);
+}
 
 function readSettings() {
   try {
@@ -30,18 +49,30 @@ function normalizeBook(book) {
       ? (contents[0]?.paragraphs ? contents : [{ title: book.title, paragraphs: contents }])
       : [{ title: book.title, paragraphs: String(contents).split(/\n\s*\n/u) }];
   }
+  // Words are counted here and split only when a chapter is paginated or shown.
   let offset = 0;
   const normalized = chapters.map((chapter, chapterIndex) => {
-    const paragraphs = (Array.isArray(chapter.paragraphs) ? chapter.paragraphs : [chapter.paragraphs || ''])
-      .map(paragraph => {
-        const words = wordsOf(paragraph);
-        const start = offset;
-        offset += words.length;
-        return { words, start, end: offset };
-      }).filter(paragraph => paragraph.words.length);
-    return { title: String(chapter.title || `Chapter ${chapterIndex + 1}`), paragraphs, start: paragraphs[0]?.start ?? offset };
+    const paragraphs = [];
+    for (const value of Array.isArray(chapter.paragraphs) ? chapter.paragraphs : [chapter.paragraphs || '']) {
+      const text = String(value || ''), count = countWords(text);
+      if (count) { paragraphs.push({ text, start: offset, end: offset + count }); offset += count; }
+    }
+    return { title: String(chapter.title || `Chapter ${chapterIndex + 1}`), paragraphs, start: paragraphs[0]?.start ?? offset, end: offset };
   }).filter(chapter => chapter.paragraphs.length);
-  return { chapters: normalized, totalWords: offset };
+  const units = [];
+  normalized.forEach((chapter, chapterIndex) => {
+    const words = chapter.end - chapter.start, parts = Math.ceil(words / SECTION_WORDS);
+    let first = 0, part = 1;
+    chapter.paragraphs.forEach((paragraph, index) => {
+      const done = paragraph.end - chapter.start;
+      if (index < chapter.paragraphs.length - 1 && done < words * part / parts) return;
+      units.push({ chapterIndex, first, last: index, start: chapter.paragraphs[first].start, end: paragraph.end, opening: first === 0 });
+      first = index + 1;
+      while (part < parts && done >= words * part / parts) part++;
+    });
+  });
+  const previewUnits = units.findIndex(unit => unit.chapterIndex > 0);
+  return { chapters: normalized, units, previewUnits: previewUnits < 0 ? units.length : previewUnits, totalWords: offset };
 }
 
 /**
@@ -55,8 +86,9 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   const motionQuery = matchMedia('(prefers-reduced-motion: reduce)');
   let book = null;
   let normalized = null;
-  let pages = [];
-  let pageIndex = 0;
+  // Paginations by measure key. `currentPage` is the left (or only) page on show.
+  const layouts = new Map();
+  let layout = null, currentPage = null, layoutCount = 0;
   let anchorOffset = 0;
   let isOpen = false;
   let isDestroyed = false;
@@ -79,6 +111,10 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   let chromeVisible = true, searchHighlight = '', openingTimer = 0;
   let appearanceMotion = null;
   let previewOnly = false;
+  let backgroundHandle = 0, backgroundIdle = false, warmedNeighbours = false, fontPending = false;
+  let fontTimer = 0, lastFontChange = -Infinity, searchTimer = 0, lastSearchInput = -Infinity;
+  let searchIndex = [], currentChapterButton = null;
+  const wordCache = new Map(), pageElements = new WeakMap(), measureRange = document.createRange();
 
   root.hidden = true;
   root.innerHTML = `
@@ -165,6 +201,15 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     tapInput.checked = settings.tapToTurn;
   }
 
+  function paragraphWords(paragraph) {
+    let words = wordCache.get(paragraph);
+    if (words) wordCache.delete(paragraph);
+    else words = wordsOf(paragraph.text);
+    wordCache.set(paragraph, words);
+    if (wordCache.size > 96) wordCache.delete(wordCache.keys().next().value);
+    return words;
+  }
+
   function makeBlock(block) {
     if (block.type === 'heading') {
       const heading = document.createElement('div');
@@ -174,15 +219,16 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       number.textContent = `Chapter ${['One','Two','Three'][block.chapterIndex] || block.chapterIndex + 1}`;
       const title = document.createElement('h2');
       title.className = 'fr-chapter-heading';
-      title.textContent = block.text;
+      title.textContent = normalized.chapters[block.chapterIndex].title;
       heading.append(number, title);
       return heading;
     }
     const paragraph = document.createElement('p');
     paragraph.className = `fr-text${block.continued ? ' fr-continued' : ''}`;
-    if (!searchHighlight) paragraph.textContent = block.text;
+    const text = paragraphWords(normalized.chapters[block.chapterIndex].paragraphs[block.paragraph]).slice(block.from, block.to).join(' ');
+    if (!searchHighlight) paragraph.textContent = text;
     else {
-      const text = block.text, lower = text.toLocaleLowerCase();
+      const lower = text.toLocaleLowerCase();
       let start = 0, match;
       while ((match = lower.indexOf(searchHighlight, start)) !== -1) {
         paragraph.append(document.createTextNode(text.slice(start, match)));
@@ -194,10 +240,14 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     return paragraph;
   }
 
-  function makePage(index, side = 'right') {
+  function pageLabel(pageData) {
+    const number = pageNumber(pageData);
+    return `${number ? `Page ${number}, ` : ''}${normalized.chapters[pageData.chapterIndex].title}`;
+  }
+
+  function makePage(pageData, side = 'right') {
     const page = document.createElement('article');
     page.className = `fr-page fr-page-${side}`;
-    const pageData = pages[index];
     const running = document.createElement('div');
     running.className = 'fr-page-running';
     running.textContent = side === 'left' && spread ? book.author : book.title;
@@ -208,8 +258,9 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     folio.className = 'fr-folio';
     if (pageData) {
       pageData.blocks.forEach(block => body.append(makeBlock(block)));
-      folio.textContent = String(index + 1);
-      page.setAttribute('aria-label', `Page ${index + 1}, ${normalized.chapters[pageData.chapterIndex].title}`);
+      folio.textContent = String(pageNumber(pageData) || '');
+      page.setAttribute('aria-label', pageLabel(pageData));
+      pageElements.set(page, pageData);
     } else {
       page.classList.add('fr-empty-page');
       const ending = document.createElement('p');
@@ -223,27 +274,129 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     return page;
   }
 
-  function lastStartIndex() { return spread ? Math.floor((pages.length - 1) / 2) * 2 : Math.max(0, pages.length - 1); }
+  // Page numbers that background pagination has just made exact replace blank folios in place.
+  function refreshFolios() {
+    bookElement.querySelectorAll('.fr-base .fr-page').forEach(element => {
+      const pageData = pageElements.get(element);
+      if (!pageData) return;
+      element.querySelector('.fr-folio').textContent = String(pageNumber(pageData) || '');
+      element.setAttribute('aria-label', pageLabel(pageData));
+    });
+  }
+
   function accessibleWords() { return previewOnly ? normalized.chapters[1].start : normalized.totalWords; }
-  function canTurn(direction) { return direction > 0 ? pageIndex < lastStartIndex() : pageIndex > 0; }
+  function unitLimit() { return previewOnly ? normalized.previewUnits : normalized.units.length; }
   function chapterForOffset(offset) {
-    let index = 0;
-    while (index + 1 < normalized.chapters.length && normalized.chapters[index + 1].start <= offset) index += 1;
-    return index;
+    let low = 0, high = normalized.chapters.length - 1;
+    while (low < high) { const middle = Math.ceil((low + high) / 2); if (normalized.chapters[middle].start <= offset) low = middle; else high = middle - 1; }
+    return low;
+  }
+  function unitForOffset(offset) {
+    let low = 0, high = unitLimit() - 1;
+    while (low < high) { const middle = Math.ceil((low + high) / 2); if (normalized.units[middle].start <= offset) low = middle; else high = middle - 1; }
+    return low;
+  }
+  function unitState(index) {
+    return layout.units[index] ||= { pages: [], done: false, paragraph: normalized.units[index].first, consumed: 0 };
+  }
+
+  // Pages are reached through their neighbours. Missing ones are paginated on demand unless
+  // `paginate` is false, which only reads what background pagination has already measured.
+  function nextPage(pageData, paginate = true) {
+    if (!pageData) return null;
+    const state = layout.units[pageData.unit];
+    if (pageData.index + 1 < state.pages.length) return state.pages[pageData.index + 1];
+    if (!state.done) return paginate ? paginateStep(pageData.unit) : null;
+    if (pageData.unit + 1 >= unitLimit()) return null;
+    return layout.units[pageData.unit + 1]?.pages[0] || (paginate ? paginateStep(pageData.unit + 1) : null);
+  }
+  function previousPage(pageData, paginate = true) {
+    if (!pageData) return null;
+    if (pageData.index > 0) return layout.units[pageData.unit].pages[pageData.index - 1];
+    const index = pageData.unit - 1;
+    if (index < 0) return null;
+    if (!layout.units[index]?.done) { if (!paginate) return null; while (!unitState(index).done) paginateStep(index); }
+    return layout.units[index].pages.at(-1);
+  }
+  function hasNext(pageData) {
+    const state = layout.units[pageData.unit];
+    return pageData.index + 1 < state.pages.length || !state.done || pageData.unit + 1 < unitLimit();
+  }
+  function hasPrevious(pageData) { return pageData.index > 0 || pageData.unit > 0; }
+  function rightPage() { return spread ? nextPage(currentPage) : null; }
+  function canTurn(direction) {
+    if (!currentPage) return false;
+    if (direction < 0) return hasPrevious(currentPage);
+    const last = spread ? rightPage() : currentPage;
+    return Boolean(last && hasNext(last));
+  }
+  // A spread is the left page and the one after it, so a turn always moves two pages.
+  function turnTarget(direction, paginate = true) {
+    if (direction > 0) { const after = nextPage(currentPage, paginate); return spread ? nextPage(after, paginate) : after; }
+    const before = previousPage(currentPage, paginate);
+    if (!spread || !before) return before;
+    return previousPage(before, paginate) || (paginate || !hasPrevious(before) ? before : null);
+  }
+  // The turning leaf: [front, back]. A single page turns over onto a blank back.
+  function turnPages(direction, target, paginate = true) {
+    if (!spread) return [direction > 0 ? currentPage : target, 'blank'];
+    return direction > 0 ? [nextPage(currentPage, paginate), target] : [nextPage(target, paginate), currentPage];
   }
   function readingFraction() {
     if (!normalized?.totalWords) return 0;
-    return pageIndex === lastStartIndex() ? accessibleWords() / normalized.totalWords : clamp(anchorOffset / normalized.totalWords, 0, 1);
+    return currentPage && !canTurn(1) ? accessibleWords() / normalized.totalWords : clamp(anchorOffset / normalized.totalWords, 0, 1);
   }
   function pageForOffset(offset) {
-    let low = 0;
-    let high = pages.length - 1;
-    while (low < high) {
-      const middle = Math.ceil((low + high) / 2);
-      if (pages[middle].start <= offset) low = middle;
-      else high = middle - 1;
+    const index = unitForOffset(offset), state = unitState(index);
+    while (!state.done && !(state.pages.at(-1)?.end > offset)) paginateStep(index);
+    return findPage(state.pages, offset);
+  }
+  function findPage(pages, offset) {
+    let low = 0, high = pages.length - 1;
+    while (low < high) { const middle = Math.ceil((low + high) / 2); if (pages[middle].start <= offset) low = middle; else high = middle - 1; }
+    return pages[low];
+  }
+
+  // Exact numbers need every earlier unit paginated; until then counts are estimates.
+  function knownPrefix() {
+    const prefix = layout.prefix;
+    while (prefix.length <= unitLimit() && layout.units[prefix.length - 1]?.done) prefix.push(prefix.at(-1) + layout.units[prefix.length - 1].pages.length);
+    return prefix;
+  }
+  function pageNumber(pageData) {
+    const prefix = knownPrefix();
+    return pageData.unit < prefix.length ? prefix[pageData.unit] + pageData.index + 1 : null;
+  }
+  function totalPages() {
+    const prefix = knownPrefix();
+    return prefix.length > unitLimit() ? prefix[unitLimit()] : null;
+  }
+  function estimatedPages(untilUnit, offset = null) {
+    const wordsPerPage = layout.pagedWords / layout.pagedPages || 250;
+    let count = 0;
+    for (let index = 0; index < untilUnit; index++) {
+      const state = layout.units[index], unit = normalized.units[index];
+      count += state?.done ? state.pages.length : (state?.pages.length || 0) + (unit.end - (state?.pages.at(-1)?.end ?? unit.start)) / wordsPerPage;
     }
-    return spread ? Math.floor(low / 2) * 2 : low;
+    return offset === null ? count : count + (offset - normalized.units[untilUnit].start) / wordsPerPage;
+  }
+  function positionText(spoken = false) {
+    const right = rightPage(), first = pageNumber(currentPage), last = right && pageNumber(right), total = totalPages();
+    if (first === null) {
+      const estimate = Math.max(1, approximately(estimatedPages(currentPage.unit) + currentPage.index + 1));
+      return `${spoken ? 'about page' : 'About page'} ${estimate} of ${Math.max(estimate, approximately(estimatedPages(unitLimit()), Math.ceil))}`;
+    }
+    const of = total ?? `about ${Math.max(last || first, approximately(estimatedPages(unitLimit()), Math.ceil))}`;
+    if (!last) return `${spoken ? 'page' : 'Page'} ${first} of ${of}`;
+    return spoken ? `pages ${first} to ${last} of ${of}` : `Pages ${first}–${last} of ${of}`;
+  }
+  function offsetText(offset) {
+    const index = unitForOffset(offset), state = layout.units[index];
+    const known = state && (state.done || state.pages.at(-1)?.end > offset) ? pageNumber(findPage(state.pages, offset)) : null;
+    const total = totalPages();
+    if (known !== null) return `page ${known} of ${total ?? `about ${Math.max(known, approximately(estimatedPages(unitLimit()), Math.ceil))}`}`;
+    const estimate = Math.max(1, approximately(estimatedPages(index, offset) + 1));
+    return `about page ${estimate} of ${Math.max(estimate, approximately(estimatedPages(unitLimit()), Math.ceil))}`;
   }
 
   function fitsMeasure() {
@@ -253,108 +406,137 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       && measureBody.scrollHeight <= measureBody.clientHeight + 1;
   }
 
-  function paginate() {
-    const result = [];
-    let current = null;
-    function startPage(chapterIndex, offset, opening = false) {
-      measureBody.replaceChildren();
-      current = { start: offset, end: offset, chapterIndex, blocks: [] };
-      if (opening) {
-        const block = { type: 'heading', chapterIndex, text: normalized.chapters[chapterIndex].title };
-        const element = makeBlock(block);
-        measureBody.append(element);
-        if (fitsMeasure()) current.blocks.push(block);
-        else element.remove(); // The running title and contents remain available in very short viewports.
-      }
-    }
-    function finishPage() {
-      if (current && current.end > current.start) result.push(current);
-      current = null;
-    }
-
-    normalized.chapters.forEach((chapter, chapterIndex) => {
-      if (previewOnly && chapterIndex > 0) return;
-      finishPage();
-      startPage(chapterIndex, chapter.start, true);
-      chapter.paragraphs.forEach(paragraph => {
-        let consumed = 0;
-        while (consumed < paragraph.words.length) {
-          if (!current) startPage(chapterIndex, paragraph.start + consumed);
-          const remaining = paragraph.words.slice(consumed);
-          const block = { type: 'paragraph', text: remaining.join(' '), continued: consumed > 0 };
-          const candidate = makeBlock(block);
-          measureBody.append(candidate);
-          if (fitsMeasure()) {
-            current.blocks.push(block);
-            current.end = paragraph.end;
-            consumed = paragraph.words.length;
-            continue;
-          }
-          let low = 0;
-          let high = remaining.length;
-          while (low < high) {
-            const middle = Math.ceil((low + high) / 2);
-            candidate.textContent = remaining.slice(0, middle).join(' ');
-            if (fitsMeasure()) low = middle;
-            else high = middle - 1;
-          }
-          if (low === 0 && current.end > current.start) {
-            candidate.remove();
-            finishPage();
-            continue;
-          }
-          if (low === 0 && current.blocks.some(item => item.type === 'heading')) {
-            measureBody.querySelector('.fr-chapter-opening')?.remove();
-            current.blocks = current.blocks.filter(item => item.type !== 'heading');
-            candidate.textContent = remaining[0];
-            low = fitsMeasure() ? 1 : 0;
-            if (low) {
-              let max = remaining.length;
-              while (low < max) {
-                const middle = Math.ceil((low + max) / 2);
-                candidate.textContent = remaining.slice(0, middle).join(' ');
-                if (fitsMeasure()) low = middle;
-                else max = middle - 1;
-              }
-            }
-          }
-          // A single extraordinarily long token can be broken by overflow-wrap.
-          // Ordinary prose always fits at least one line after the opening is removed.
-          low = Math.max(1, low);
-          block.text = remaining.slice(0, low).join(' ');
-          candidate.textContent = block.text;
-          // Move a new paragraph to the next page rather than strand one line.
-          const lineHeight=parseFloat(getComputedStyle(candidate).lineHeight);
-          if (current.end > current.start && candidate.getBoundingClientRect().height < lineHeight * 1.9) {
-            candidate.remove(); finishPage(); continue;
-          }
-          current.blocks.push(block);
-          consumed += low;
-          current.end = paragraph.start + consumed;
-          finishPage();
-        }
-      });
-    });
-    finishPage();
-    return result;
+  function measureParagraph(text, continued) {
+    const paragraph = document.createElement('p');
+    paragraph.className = continued ? 'fr-text fr-continued' : 'fr-text';
+    paragraph.textContent = text;
+    return paragraph;
   }
 
-  function buildBase(leftIndex = pageIndex, rightIndex = pageIndex + 1) {
+  // Constant for a layout, so they are read once rather than at every page break.
+  function pageMetrics() {
+    if (!layout.metrics) {
+      const sample = measureParagraph('Measure', false);
+      measureBody.replaceChildren(sample);
+      const bounds = measureBody.getBoundingClientRect(), lineHeight = parseFloat(getComputedStyle(sample).lineHeight) || settings.fontSize * 1.55;
+      layout.metrics = { bottom: bounds.bottom - 1, lineHeight, chars: Math.max(160, bounds.height / lineHeight * bounds.width / (settings.fontSize * .48)) };
+    }
+    return layout.metrics;
+  }
+
+  // The most words of an overflowing paragraph that fit, read from one layout through
+  // ranges: the text does not change while searching, so nothing is laid out again.
+  function fittingWords(item, metrics) {
+    const node = item.element.firstChild, ends = [];
+    let offset = 0;
+    for (let index = item.from; index < item.to; index++) { offset += item.words[index].length; ends.push(offset); offset++; }
+    const fits = count => {
+      const end = ends[count - 1], code = node.data.charCodeAt(end - 1);
+      measureRange.setStart(node, end - (code >= 0xdc00 && code <= 0xdfff && end > 1 ? 2 : 1));
+      measureRange.setEnd(node, end);
+      const rects = measureRange.getClientRects(), rect = rects[rects.length - 1];
+      return !rect || rect.bottom + Math.max(0, (metrics.lineHeight - rect.height) / 2) <= metrics.bottom;
+    };
+    let low = 0, high = ends.length;
+    while (low < high) { const middle = Math.ceil((low + high) / 2); if (fits(middle)) low = middle; else high = middle - 1; }
+    return low;
+  }
+  // Measures each candidate; used when line geometry disagrees with the page.
+  function fittingWordsByLayout(item, max) {
+    let low = 0, high = max;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      item.element.textContent = item.words.slice(item.from, item.from + middle).join(' ');
+      if (fitsMeasure()) low = middle;
+      else high = middle - 1;
+    }
+    return low;
+  }
+
+  // Lays out the next page of a unit: about a page of text is appended and laid out once,
+  // then the break is found in the paragraph that runs past the page.
+  function paginateStep(unitIndex) {
+    const unit = normalized.units[unitIndex], state = unitState(unitIndex), metrics = pageMetrics();
+    const chapter = normalized.chapters[unit.chapterIndex], paragraphs = chapter.paragraphs;
+    const pageData = { unit: unitIndex, index: state.pages.length, chapterIndex: unit.chapterIndex, start: paragraphs[state.paragraph].start + state.consumed, end: 0, blocks: [] };
+    measureBody.replaceChildren();
+    let heading = null;
+    if (unit.opening && !pageData.index && !state.withoutHeading) {
+      heading = makeBlock({ type: 'heading', chapterIndex: unit.chapterIndex });
+      measureBody.append(heading);
+    }
+    const items = [];
+    let next = state.paragraph, from = state.consumed, budget = metrics.chars * 1.15, used = 0, fits;
+    for (;;) {
+      while (next <= unit.last && used < budget) {
+        const words = paragraphWords(paragraphs[next]), open = items.at(-1)?.paragraph === next ? items.at(-1) : null;
+        // Long paragraphs are appended in pieces; greedy line breaking lays out a prefix the same way.
+        const limit = budget - used + 1500;
+        let to = open ? open.to : from, chars = 0;
+        if (!open && !from && paragraphs[next].text.length <= limit) { to = words.length; chars = paragraphs[next].text.length; }
+        else while (to < words.length && chars < limit) chars += words[to++].length + 1;
+        used += chars;
+        if (open) { open.to = to; open.element.textContent = words.slice(open.from, to).join(' '); }
+        else { const element = measureParagraph(words.slice(from, to).join(' '), from > 0); measureBody.append(element); items.push({ element, paragraph: next, words, from, to }); }
+        if (to < words.length) break;
+        next++; from = 0;
+      }
+      fits = fitsMeasure();
+      if (!fits || next > unit.last) break;
+      budget = Math.max(budget, used) + metrics.chars * .5;
+    }
+    if (!fits && heading && heading.getBoundingClientRect().bottom > metrics.bottom) {
+      // The running title and contents remain available in very short viewports.
+      state.withoutHeading = true;
+      return paginateStep(unitIndex);
+    }
+    let placed = items.length, count = 0;
+    if (!fits) {
+      let low = 0, high = items.length - 1;
+      while (low < high) { const middle = (low + high) >> 1; if (items[middle].element.getBoundingClientRect().bottom > metrics.bottom) high = middle; else low = middle + 1; }
+      placed = low;
+      const item = items[low], hasText = low > 0;
+      const show = words => { item.element.textContent = item.words.slice(item.from, item.from + words).join(' '); };
+      count = fittingWords(item, metrics);
+      items.slice(low + 1).forEach(other => other.element.remove());
+      if (count) { show(count); if (!fitsMeasure()) { count = fittingWordsByLayout(item, count - 1); show(count); } }
+      if (!count && !hasText && heading) { heading.remove(); heading = null; count = fittingWordsByLayout(item, item.to - item.from); show(count); }
+      // A single extraordinarily long token can be broken by overflow-wrap.
+      if (!count && !hasText) { count = 1; show(1); }
+      // Move a new paragraph to the next page rather than strand one line.
+      if (count && hasText && item.from + count < item.words.length && item.element.getBoundingClientRect().height < metrics.lineHeight * 1.9) count = 0;
+      if (count) {
+        pageData.blocks.push({ type: 'paragraph', chapterIndex: unit.chapterIndex, paragraph: item.paragraph, from: item.from, to: item.from + count, continued: item.from > 0 });
+        next = item.paragraph; from = item.from + count;
+        if (from >= item.words.length) { next++; from = 0; }
+      } else { item.element.remove(); next = item.paragraph; from = item.from; }
+    }
+    pageData.blocks.unshift(...items.slice(0, placed).map(item => ({ type: 'paragraph', chapterIndex: unit.chapterIndex, paragraph: item.paragraph, from: item.from, to: item.to, continued: item.from > 0 })));
+    if (heading) pageData.blocks.unshift({ type: 'heading', chapterIndex: unit.chapterIndex });
+    state.paragraph = next; state.consumed = from; state.done = next > unit.last;
+    pageData.end = state.done ? unit.end : paragraphs[next].start + from;
+    state.pages.push(pageData);
+    layout.pagedWords += pageData.end - pageData.start; layout.pagedPages++;
+    if (!state.done) metrics.chars = metrics.chars * .6 + measureBody.textContent.length * .4;
+    return pageData;
+  }
+
+  function buildBase(left = currentPage, right = rightPage()) {
     const base = document.createElement('div');
     base.className = 'fr-base';
     if (spread) {
-      const left = document.createElement('div');
-      left.className = 'fr-slot fr-slot-left';
-      left.append(makePage(leftIndex, 'left'));
-      const right = document.createElement('div');
-      right.className = 'fr-slot fr-slot-right';
-      right.append(makePage(rightIndex, 'right'));
-      base.append(left, right);
+      const leftSlot = document.createElement('div');
+      leftSlot.className = 'fr-slot fr-slot-left';
+      leftSlot.append(makePage(left, 'left'));
+      const rightSlot = document.createElement('div');
+      rightSlot.className = 'fr-slot fr-slot-right';
+      rightSlot.append(makePage(right, 'right'));
+      base.append(leftSlot, rightSlot);
       const gutter = document.createElement('div');
       gutter.className = 'fr-gutter';
       gutter.setAttribute('aria-hidden', 'true');
       base.append(gutter);
-    } else base.append(makePage(leftIndex));
+    } else base.append(makePage(left));
     return base;
   }
 
@@ -363,34 +545,37 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     bookElement.classList.remove('fr-turning');
     bookElement.setAttribute('aria-busy', 'false');
     curlRenderer?.hide();
+    warmedNeighbours = false;
     warmPages();
   }
 
   function updateChrome(announce = false) {
-    if (!pages.length) return;
+    if (!currentPage) return;
     const chapterIndex = chapterForOffset(anchorOffset);
     const chapter = normalized.chapters[chapterIndex];
-    const endPage = Math.min(pages.length, pageIndex + (spread ? 2 : 1));
+    const right = rightPage(), atEnd = !canTurn(1), first = pageNumber(currentPage), total = totalPages();
+    layout.precision = `${first !== null}:${total !== null}`;
     chapterElement.textContent = chapter.title;
     chapterElement.setAttribute('aria-label', `Contents, current chapter ${chapter.title}`);
-    pageCountElement.textContent = !chromeVisible ? String(pageIndex + 1) : spread && endPage > pageIndex + 1
-      ? `Pages ${pageIndex + 1}–${endPage} of ${pages.length}` : `Page ${pageIndex + 1} of ${pages.length}`;
+    pageCountElement.textContent = !chromeVisible ? String(first ?? '') : positionText();
     if (previewOnly && chromeVisible) pageCountElement.textContent += ' · Preview';
-    previewButton.hidden = !previewOnly || canTurn(1);
+    previewButton.hidden = !previewOnly || !atEnd;
     previewButton.inert = controls.expanded;
     reader.dataset.frPreviewEnd = String(!previewButton.hidden);
-    const left = pages.length - endPage;
-    root.querySelector('.fr-pages-left').textContent = left ? `${left} ${left === 1 ? 'page' : 'pages'} left` : 'End of story';
-    controls.update({percentage:Math.round(readingFraction()*100),previousDisabled:!canTurn(-1),nextDisabled:!canTurn(1)&&!previewOnly});
+    const shown = (right && pageNumber(right)) || first, left = total !== null && shown !== null ? total - shown : null;
+    root.querySelector('.fr-pages-left').textContent = atEnd ? 'End of story' : left ? `${left} ${left === 1 ? 'page' : 'pages'} left` : '';
+    controls.update({percentage:Math.round(readingFraction()*100),previousDisabled:!canTurn(-1),nextDisabled:atEnd&&!previewOnly});
     range.max = String(Math.max(1, accessibleWords() - 1));
-    range.value = String(pageIndex === lastStartIndex() ? range.max : clamp(anchorOffset, 0, accessibleWords() - 1));
-    range.setAttribute('aria-valuetext', `${chapter.title}, page ${pageIndex + 1} of ${pages.length}`);
+    range.value = String(atEnd ? range.max : clamp(anchorOffset, 0, accessibleWords() - 1));
+    range.setAttribute('aria-valuetext', `${chapter.title}, ${positionText(true)}`);
     range.style.setProperty('--fr-progress', `${Number(range.value) / Number(range.max) * 100}%`);
-    chapterList.querySelectorAll('button').forEach(button => {
-      if (Number(button.dataset.frChapter) === chapterIndex) button.setAttribute('aria-current', 'true');
-      else button.removeAttribute('aria-current');
-    });
-    if (announce) announcement.textContent = `${chapter.title}. Page ${pageIndex + 1}${endPage > pageIndex + 1 ? ` to ${endPage}` : ''} of ${pages.length}.`;
+    const button = chapterList.children[chapterIndex]?.firstElementChild || null;
+    if (button !== currentChapterButton) {
+      currentChapterButton?.removeAttribute('aria-current');
+      button?.setAttribute('aria-current', 'true');
+      currentChapterButton = button;
+    }
+    if (announce) announcement.textContent = `${chapter.title}. ${positionText(true).replace(/^./, letter => letter.toUpperCase())}.`;
   }
 
   function emitProgress() {
@@ -407,44 +592,108 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     else send();
   }
 
-  function reflow(force = false) {
-    if (!isOpen || !book) return;
+  function measureGeometry() {
     const stageStyle = getComputedStyle(stage);
     const width = stage.clientWidth - parseFloat(stageStyle.paddingLeft) - parseFloat(stageStyle.paddingRight);
     const height = stage.clientHeight - parseFloat(stageStyle.paddingTop) - parseFloat(stageStyle.paddingBottom);
-    if (!width || !height) return;
+    if (!width || !height) return null;
     const readerStyle = getComputedStyle(reader);
     const fullBleed = readerStyle.getPropertyValue('--fr-full-bleed').trim() === '1';
-    const spreadAvailable = !fullBleed && reader.clientWidth >= 900;
-    spreadInput.disabled = !spreadAvailable;
-    root.querySelector('.fr-spread-note').textContent = spreadAvailable ? 'For a little more room.' : 'Available in a wider window.';
-    spread = settings.spread && spreadAvailable;
-    spreadInput.checked = spread;
+    const spreadAvailable = !fullBleed && reader.clientWidth >= 900, isSpread = settings.spread && spreadAvailable;
     const safe = side => parseFloat(readerStyle.getPropertyValue(`--fr-safe-${side}`)) || 0;
     const safeTop = safe('top'), safeBottom = safe('bottom');
-    const availableHeight = Math.max(120, Math.min(height, spread ? 780 : 860));
-    pageWidth = Math.floor(fullBleed ? width : Math.min(width / (spread ? 2 : 1), spread ? 580 : 640, availableHeight * (spread ? .7 : .74)));
-    pageHeight = Math.floor(fullBleed ? height : Math.min(availableHeight, pageWidth * (spread ? 1.6 : 1.8)));
-    const key = `${pageWidth}:${pageHeight}:${spread}:${fullBleed}:${settings.fontSize}:${safeTop}:${safeBottom}:${safe('left')}:${safe('right')}`;
-    if (!force && key === lastMeasureKey) return;
-    lastMeasureKey = key;
+    const availableHeight = Math.max(120, Math.min(height, isSpread ? 780 : 860));
+    const pageW = Math.floor(fullBleed ? width : Math.min(width / (isSpread ? 2 : 1), isSpread ? 580 : 640, availableHeight * (isSpread ? .7 : .74)));
+    const pageH = Math.floor(fullBleed ? height : Math.min(availableHeight, pageW * (isSpread ? 1.6 : 1.8)));
+    const insetX = reader.clientWidth < 520 ? 22 : pageW < 440 ? 32 : 44, insetY = reader.clientWidth < 520 || pageH < 520 ? 24 : 36, insetBottom = reader.clientWidth < 520 ? 16 : 22;
+    const key = `${pageW}:${pageH}:${isSpread}:${fullBleed}:${settings.fontSize}:${safeTop}:${safeBottom}:${safe('left')}:${safe('right')}:${insetX}:${insetY}:${insetBottom}`;
+    return { key, fullBleed, spreadAvailable, spread: isSpread, pageWidth: pageW, pageHeight: pageH, safeTop, safeBottom, insetX, insetY, insetBottom };
+  }
+
+  function reflow(force = false) {
+    if (!isOpen || !book) return;
+    const geometry = measureGeometry();
+    if (!geometry) return;
+    const { fullBleed, safeTop, safeBottom } = geometry;
+    spreadInput.disabled = !geometry.spreadAvailable;
+    root.querySelector('.fr-spread-note').textContent = geometry.spreadAvailable ? 'For a little more room.' : 'Available in a wider window.';
+    spread = geometry.spread;
+    spreadInput.checked = spread;
+    pageWidth = geometry.pageWidth;
+    pageHeight = geometry.pageHeight;
+    if (!force && geometry.key === lastMeasureKey) return;
+    lastMeasureKey = geometry.key;
     abortTurn();
     reader.classList.toggle('fr-compact', (fullBleed ? pageHeight - 160 - safeTop - safeBottom : pageHeight) < 380);
     bookElement.classList.toggle('fr-is-spread', spread);
     bookElement.style.width = `${pageWidth * (spread ? 2 : 1)}px`;
     bookElement.style.height = `${pageHeight}px`;
-    reader.style.setProperty('--fr-page-inset-x', `${reader.clientWidth < 520 ? 22 : pageWidth < 440 ? 32 : 44}px`);
-    reader.style.setProperty('--fr-page-inset-y', `${reader.clientWidth < 520 || pageHeight < 520 ? 24 : 36}px`);
-    reader.style.setProperty('--fr-page-inset-bottom', `${reader.clientWidth < 520 ? 16 : 22}px`);
+    reader.style.setProperty('--fr-page-inset-x', `${geometry.insetX}px`);
+    reader.style.setProperty('--fr-page-inset-y', `${geometry.insetY}px`);
+    reader.style.setProperty('--fr-page-inset-bottom', `${geometry.insetBottom}px`);
     reader.style.setProperty('--fr-bar-width', `${Math.max(pageWidth * (spread ? 2 : 1), 560)}px`);
     measurePage.style.width = `${pageWidth}px`;
     measurePage.style.height = `${pageHeight}px`;
-    pages = paginate();
-    if (!pages.length) pages = [{ start: 0, end: 0, chapterIndex: 0, blocks: [] }];
-    pageIndex = pageForOffset(anchorOffset);
+    // Returning to a measured size reuses its pages; only the current unit is paginated now.
+    if (force) layouts.delete(geometry.key);
+    layout = layouts.get(geometry.key);
+    if (layout) layouts.delete(geometry.key);
+    else layout = { id: ++layoutCount, units: [], prefix: [0], scan: 0, pagedWords: 0, pagedPages: 0, metrics: null, precision: '' };
+    layouts.set(geometry.key, layout);
+    while (layouts.size > 4) layouts.delete(layouts.keys().next().value);
+    currentPage = pageForOffset(anchorOffset);
     renderBase();
     updateChrome();
     emitProgress();
+    scheduleBackground();
+  }
+
+  // Apply a pending resize or text size before the reader moves.
+  function settleLayout() {
+    if (!fontTimer && !resizeTimer) return;
+    clearTimeout(fontTimer); clearTimeout(resizeTimer); fontTimer = resizeTimer = 0;
+    reflow();
+  }
+
+  // The rest of the book is paginated in short idle slices: the current unit and its
+  // neighbours first, then everything in order so page numbers become exact.
+  function scheduleBackground(delay = 0) {
+    if (backgroundHandle || !isOpen || fontPending || !layout) return;
+    backgroundIdle = !delay && typeof requestIdleCallback === 'function';
+    backgroundHandle = backgroundIdle ? requestIdleCallback(runBackground, { timeout: 400 }) : setTimeout(runBackground, delay || 16);
+  }
+  function cancelBackground() {
+    if (backgroundIdle) cancelIdleCallback(backgroundHandle); else clearTimeout(backgroundHandle);
+    backgroundHandle = 0;
+  }
+  function backgroundUnit() {
+    const limit = unitLimit(), current = currentPage.unit;
+    // A few pages ahead, then the previous unit: turning back into it needs all of it.
+    if (!layout.units[current].done && layout.units[current].pages.length < currentPage.index + 5) return current;
+    for (const index of [current - 1, current, current + 1]) if (index >= 0 && index < limit && !layout.units[index]?.done) return index;
+    while (layout.scan < limit && layout.units[layout.scan]?.done) layout.scan++;
+    return layout.scan < limit ? layout.scan : -1;
+  }
+  function runBackground(deadline) {
+    backgroundHandle = 0;
+    if (!isOpen || !layout || !currentPage || fontPending) return;
+    if (turn || pointer || fontTimer || resizeTimer) { scheduleBackground(150); return; }
+    const geometry = measureGeometry();
+    if (geometry?.key !== lastMeasureKey) { if (geometry) onResize(); else scheduleBackground(500); return; }
+    const until = performance.now() + clamp(deadline?.timeRemaining?.() ?? 10, 4, 12);
+    let index;
+    while ((index = backgroundUnit()) !== -1) {
+      paginateStep(index);
+      if (performance.now() >= until) break;
+    }
+    let waiting = false;
+    if (`${pageNumber(currentPage) !== null}:${totalPages() !== null}` !== layout.precision) {
+      // Newly exact numbers refresh the labels, though not under a reader using the slider.
+      if (document.activeElement === range) waiting = true;
+      else { updateChrome(); refreshFolios(); }
+    }
+    if (!warmedNeighbours && [1, -1].every(direction => !canTurn(direction) || turnTarget(direction, false))) { warmedNeighbours = true; warmPages(); }
+    if (index !== -1 || waiting) scheduleBackground(index === -1 ? 500 : 0);
   }
 
   function cancelOpening() { clearTimeout(openingTimer); bookElement.querySelector('.fr-opening-cover')?.remove(); }
@@ -577,28 +826,53 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   }
 
   function searchBook() {
+    clearTimeout(searchTimer);
     const query = bookSearch.value.trim().toLocaleLowerCase();
     searchResults.replaceChildren();
     if (!query) { root.querySelector('.fr-search-status').textContent = 'Search the text of this book.'; return; }
+    const chapters = previewOnly ? 1 : normalized.chapters.length;
+    while (searchIndex.length < chapters) indexChapter();
     let count = 0;
-    for (const chapter of (previewOnly ? normalized.chapters.slice(0,1) : normalized.chapters)) for (const paragraph of chapter.paragraphs) {
-      const text = paragraph.words.join(' '), index = text.toLocaleLowerCase().indexOf(query);
-      if (index < 0) continue;
-      count++;
-      if (count > 40) continue;
-      const offset = paragraph.start + wordsOf(text.slice(0, index)).length;
-      const item = document.createElement('li'), button = document.createElement('button');
-      button.type = 'button'; button.dataset.frAction = 'search-result'; button.dataset.frOffset = String(offset);
-      const title = document.createElement('strong'); title.textContent = chapter.title;
-      // Cut the excerpt at word boundaries; mark only cuts that leave a sentence unfinished.
-      let start = Math.max(0, index - 45), end = Math.min(text.length, index + query.length + 90);
-      if (start > 0) start = text.lastIndexOf(' ', start) + 1;
-      if (end < text.length) { const space = text.indexOf(' ', end); end = space < 0 ? text.length : space; }
-      const excerpt = text.slice(start, end).trim();
-      const snippet = document.createElement('span'); snippet.textContent = `${start > 0 ? '…' : ''}${excerpt}${end < text.length && !/[.!?…]['"’”)]*$/.test(excerpt) ? '…' : ''}`;
-      button.append(title, snippet); item.append(button); searchResults.append(item);
+    for (let chapterIndex = 0; chapterIndex < chapters; chapterIndex++) {
+      const chapter = normalized.chapters[chapterIndex], lower = searchIndex[chapterIndex];
+      for (let paragraphIndex = 0; paragraphIndex < lower.length; paragraphIndex++) {
+        const index = lower[paragraphIndex].indexOf(query);
+        if (index < 0) continue;
+        count++;
+        if (count > 40) continue;
+        const paragraph = chapter.paragraphs[paragraphIndex], text = paragraphWords(paragraph).join(' ');
+        // The match's own word: one space separates each word.
+        let offset = paragraph.start;
+        for (let space = text.indexOf(' '); space !== -1 && space < index; space = text.indexOf(' ', space + 1)) offset++;
+        const item = document.createElement('li'), button = document.createElement('button');
+        button.type = 'button'; button.dataset.frAction = 'search-result'; button.dataset.frOffset = String(offset);
+        const title = document.createElement('strong'); title.textContent = chapter.title;
+        // Cut the excerpt at word boundaries; mark only cuts that leave a sentence unfinished.
+        let start = Math.max(0, index - 45), end = Math.min(text.length, index + query.length + 90);
+        if (start > 0) start = text.lastIndexOf(' ', start) + 1;
+        if (end < text.length) { const space = text.indexOf(' ', end); end = space < 0 ? text.length : space; }
+        const excerpt = text.slice(start, end).trim();
+        const snippet = document.createElement('span'); snippet.textContent = `${start > 0 ? '…' : ''}${excerpt}${end < text.length && !/[.!?…]['"’”)]*$/.test(excerpt) ? '…' : ''}`;
+        button.append(title, snippet); item.append(button); searchResults.append(item);
+      }
     }
     root.querySelector('.fr-search-status').textContent = `${count} ${count === 1 ? 'passage' : 'passages'} found${count > 40 ? ' · showing the first 40' : ''}`;
+  }
+
+  // Lowercase text with single spaces between words, built once per opened book: in idle
+  // time while the search panel is open, and finished by the first search if need be.
+  function indexChapter() {
+    searchIndex.push(normalized.chapters[searchIndex.length].paragraphs.map(paragraph => paragraph.text.replace(/\s+/gu, ' ').trim().toLocaleLowerCase()));
+  }
+  function prepareSearch() {
+    const index = searchIndex, chapters = previewOnly ? 1 : normalized.chapters.length;
+    if (index.length >= chapters) return;
+    (window.requestIdleCallback || setTimeout)(() => {
+      if (!isOpen || index !== searchIndex || searchPanel.hidden) return;
+      const until = performance.now() + 8;
+      while (index.length < chapters && performance.now() < until) indexChapter();
+      prepareSearch();
+    });
   }
 
   function abortTurn() {
@@ -623,47 +897,55 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     return curlRenderer;
   }
 
-  function pageTexture(index, side = '') {
+  function pageTexture(pageData, side = '') {
     const gpu = renderer();
     if (!gpu) return null;
-    const page = index === null ? document.createElement('div') : makePage(index, side);
-    if (index === null) page.className = 'fr-page';
-    return gpu.prepare(page, `${book.id}:${lastMeasureKey}:${settings.theme}:${searchHighlight}:${index}:${side}`, pageWidth, pageHeight);
+    const page = pageData === 'blank' ? document.createElement('div') : makePage(pageData, side);
+    if (pageData === 'blank') page.className = 'fr-page';
+    const id = pageData === 'blank' ? 'blank' : pageData ? `${pageData.unit}.${pageData.index}.${pageNumber(pageData) || ''}` : 'end';
+    return gpu.prepare(page, `${book.id}:${layout.id}:${settings.theme}:${searchHighlight}:${id}:${side}`, pageWidth, pageHeight);
   }
 
-  function turnTextures(direction, targetIndex) {
-    return {
-      front: pageTexture(spread ? (direction > 0 ? pageIndex + 1 : targetIndex + 1) : (direction > 0 ? pageIndex : targetIndex), spread ? 'right' : ''),
-      back: pageTexture(spread ? (direction > 0 ? targetIndex : pageIndex) : null, spread ? 'left' : '')
-    };
+  function turnTextures(direction, target) {
+    const [front, back] = turnPages(direction, target);
+    return { front: pageTexture(front, spread ? 'right' : ''), back: pageTexture(back, spread ? 'left' : '') };
   }
 
   function warmPages() {
     clearTimeout(warmTimer);
-    if (!isOpen || motionQuery.matches || !pages.length || document.hidden) return;
-    warmTimer = setTimeout(() => {
+    if (!isOpen || motionQuery.matches || !currentPage || document.hidden) return;
+    let jobs = null, first = null;
+    const warm = () => {
       if (!isOpen || turn || pointer) return;
-      let first;
-      for (const direction of [1, -1]) if (canTurn(direction)) { const textures = turnTextures(direction, pageIndex + direction * (spread ? 2 : 1)); first ||= textures; }
+      if (!jobs) {
+        // Only pages already measured: background pagination warms the rest when it reaches them.
+        const plans = [1, -1].map(direction => { const target = canTurn(direction) && turnTarget(direction, false); return target && turnPages(direction, target, false); }).filter(pages => pages?.[0] && pages[1]);
+        first = plans[0];
+        jobs = plans.flatMap(([front, back]) => [[front, spread ? 'right' : ''], [back, spread ? 'left' : '']]);
+      }
+      // One page a task, so rasterising never holds up input for long.
+      if (jobs.length) { pageTexture(...jobs.shift()); warmTimer = setTimeout(warm, 16); return; }
+      const textures = first && curlRenderer && { front: pageTexture(first[0], spread ? 'right' : ''), back: pageTexture(first[1], spread ? 'left' : '') };
       // Compile the GPU draw path before the first touch, then keep it hidden.
-      if (first && curlRenderer) {
+      if (textures?.front && textures.back) {
         const bounds = bookElement.getBoundingClientRect(), outer = stage.getBoundingClientRect();
         curlRenderer.paint({ progress: 0, grab: 0, width: pageWidth, height: pageHeight,
-          originX: bounds.left - outer.left + (spread ? pageWidth : 0), originY: bounds.top - outer.top, ...first });
+          originX: bounds.left - outer.left + (spread ? pageWidth : 0), originY: bounds.top - outer.top, ...textures });
         curlRenderer.hide();
       }
-    }, 80);
+    };
+    warmTimer = setTimeout(warm, 80);
   }
 
   function beginTurn(direction, grab = 0) {
     if (turn || !canTurn(direction)) return false;
+    const target = turnTarget(direction);
+    if (!target) return false;
     clearTimeout(warmTimer);
-    const step = spread ? 2 : 1;
-    const targetIndex = clamp(pageIndex + direction * step, 0, lastStartIndex());
-    const textures = turnTextures(direction, targetIndex);
+    const textures = turnTextures(direction, target);
     const base = spread
-      ? (direction > 0 ? buildBase(pageIndex, targetIndex + 1) : buildBase(targetIndex, pageIndex + 1))
-      : buildBase(direction > 0 ? targetIndex : pageIndex);
+      ? (direction > 0 ? buildBase(currentPage, nextPage(target)) : buildBase(target, rightPage()))
+      : buildBase(direction > 0 ? target : currentPage);
     const shadow = document.createElement('div');
     shadow.className = 'fr-turn-shadow';
     shadow.setAttribute('aria-hidden', 'true');
@@ -674,13 +956,13 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       leaf = document.createElement('div');
       leaf.className = 'fr-leaf';
       leaf.setAttribute('aria-hidden', 'true');
-      leaf.append(makePage(spread ? (direction > 0 ? pageIndex + 1 : targetIndex + 1) : (direction > 0 ? pageIndex : targetIndex)));
+      leaf.append(makePage(turnPages(direction, target)[0]));
       bookElement.append(leaf);
     }
     const bounds = bookElement.getBoundingClientRect(), stageBounds = stage.getBoundingClientRect();
     bookElement.classList.add('fr-turning');
     bookElement.setAttribute('aria-busy', 'true');
-    turn = { direction, targetIndex, progress: 0, leaf, textures, shadow, grab,
+    turn = { direction, target, progress: 0, leaf, textures, shadow, grab,
       originX: bounds.left - stageBounds.left + (spread ? pageWidth : 0), originY: bounds.top - stageBounds.top };
     paintTurn(0);
     return true;
@@ -703,8 +985,8 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     if (!turn) return;
     const queued = queuedDirection;
     if (complete) {
-      pageIndex = turn.targetIndex;
-      anchorOffset = pages[pageIndex].start;
+      currentPage = turn.target;
+      anchorOffset = currentPage.start;
     }
     turn = null;
     frameId = 0;
@@ -712,6 +994,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     renderBase();
     updateChrome(complete);
     if (complete) emitProgress();
+    scheduleBackground();
     if (queued && isOpen) requestTurn(queued);
   }
 
@@ -734,17 +1017,19 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
 
   function requestTurn(direction) {
     cancelOpening();
-    if (!isOpen || !pages.length) return;
+    if (!isOpen || !currentPage) return;
     closePanels();
     if (turn) { queuedDirection = direction; return; }
+    settleLayout();
     if (!canTurn(direction)) { if (previewOnly && direction > 0) onPreviewEnd(book.id); return; }
     if (motionQuery.matches) {
-      pageIndex = clamp(pageIndex + direction * (spread ? 2 : 1), 0, lastStartIndex());
-      anchorOffset = pages[pageIndex].start;
+      currentPage = turnTarget(direction);
+      anchorOffset = currentPage.start;
       renderBase();
       bookElement.animate?.([{ opacity: .72 }, { opacity: 1 }], { duration: 110, easing: 'ease-out' });
       updateChrome(true);
       emitProgress();
+      scheduleBackground();
       return;
     }
     if (beginTurn(direction)) releaseTurn(true, .4);
@@ -752,13 +1037,15 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
 
   function jumpToOffset(offset, announce = true, {keepPanel=false} = {}) {
     cancelOpening();
+    settleLayout();
     abortTurn();
     anchorOffset = clamp(Number(offset) || 0, 0, Math.max(0, accessibleWords() - 1));
-    pageIndex = pageForOffset(anchorOffset);
+    currentPage = pageForOffset(anchorOffset);
     renderBase();
     if(!keepPanel)closePanels();
     updateChrome(announce);
     emitProgress();
+    scheduleBackground();
   }
 
   function onClick(event) {
@@ -771,7 +1058,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       previewButton.inert = show;
       if(show&&event.detail===0)root.querySelector('.fr-contents-toggle')?.focus({preventScroll:true});
     }
-    else if (action === 'search') { searchBook(); togglePanel(action, button); }
+    else if (action === 'search') { searchBook(); togglePanel(action, button); prepareSearch(); }
     else if (action === 'search-result') { searchHighlight = bookSearch.value.trim().toLocaleLowerCase(); jumpToOffset(Number(button.dataset.frOffset)); setChrome(false); bookElement.focus({ preventScroll: true }); }
     else if (action === 'previous') requestTurn(-1);
     else if (action === 'next') requestTurn(1);
@@ -789,7 +1076,11 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       applySettings();
       if (button.disabled) root.querySelector('.fr-size-button:not(:disabled)')?.focus({ preventScroll: true });
       saveSettings();
-      reflow(true);
+      // The first change reflows at once; quick repeats settle into one reflow.
+      clearTimeout(fontTimer); fontTimer = 0;
+      if (performance.now() - lastFontChange > 250) reflow();
+      else fontTimer = setTimeout(() => { fontTimer = 0; reflow(); }, 180);
+      lastFontChange = performance.now();
     } else if (action === 'theme') {
       settings.theme = button.dataset.frThemeOption;
       applySettings();
@@ -833,6 +1124,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       if (Math.abs(dx) < 8 || Math.abs(dx) < Math.abs(dy) * 1.15 || !pointer.allowDrag || pointer.hadSelection) return;
       if (window.getSelection()?.toString()) { pointer = null; return; }
       pointer.direction ||= dx < 0 ? 1 : -1;
+      if (fontTimer || resizeTimer) { settleLayout(); pointer = null; return; }
       if ((!canTurn(pointer.direction) && !(previewOnly && pointer.direction > 0)) || dx * pointer.direction >= 0) { pointer = null; return; }
       pointer.dragging = true;
       setChrome(false);
@@ -926,7 +1218,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   function onSpreadChange() {
     settings.spread = spreadInput.checked;
     saveSettings();
-    reflow(true);
+    reflow();
   }
 
   function onTapToTurnChange() {
@@ -935,10 +1227,10 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   }
 
   function onRangeInput() {
-    if (!pages.length) return;
-    const previewIndex = pageForOffset(Number(range.value));
+    if (!currentPage) return;
+    // Scrubbing reads measured pages only; elsewhere the page number is an estimate.
     const chapter = normalized.chapters[chapterForOffset(Number(range.value))];
-    range.setAttribute('aria-valuetext', `${chapter.title}, page ${previewIndex + 1} of ${pages.length}`);
+    range.setAttribute('aria-valuetext', `${chapter.title}, ${offsetText(Number(range.value))}`);
     range.style.setProperty('--fr-progress', `${Number(range.value) / Number(range.max) * 100}%`);
   }
 
@@ -954,7 +1246,14 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     if (!isOpen) return;
     finishAppearanceMotion();
     clearTimeout(resizeTimer);
-    resizeTimer = setTimeout(() => reflow(), 100);
+    resizeTimer = setTimeout(() => { resizeTimer = 0; reflow(); }, 100);
+  }
+  // A search after a pause runs at once; a burst of typing settles into one search.
+  function onSearchInput() {
+    clearTimeout(searchTimer);
+    if (performance.now() - lastSearchInput > 150) searchBook();
+    else searchTimer = setTimeout(searchBook, 150);
+    lastSearchInput = performance.now();
   }
   const onPointerUp = event => endPointer(event);
   const onPointerCancel = event => endPointer(event, true);
@@ -990,7 +1289,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
   document.addEventListener('focusin', onFocusIn);
   spreadInput.addEventListener('change', onSpreadChange);
   tapInput.addEventListener('change', onTapToTurnChange);
-  bookSearch.addEventListener('input', searchBook);
+  bookSearch.addEventListener('input', onSearchInput);
   range.addEventListener('input', onRangeInput);
   range.addEventListener('change', onRangeChange);
   window.addEventListener('resize', onResize);
@@ -1009,7 +1308,8 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     }
     previewOnly = preview && normalized.chapters.length > 1;
     anchorOffset = clamp(Number(wordOffset) || 0, 0, Math.max(0, accessibleWords() - 1));
-    pageIndex = 0;
+    measureBody.lang = book.language || 'en';
+    fontPending = false;
     previousFocus = focusBeforeOpen;
     isOpen = true;
     root.hidden = false;
@@ -1020,7 +1320,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     document.documentElement.classList.add('fr-reader-open');
     titleElement.textContent = book.title || 'Untitled';
     authorElement.textContent = (book.author || '') + (previewOnly ? ' · Free preview' : '');
-    chapterList.replaceChildren();
+    const contents = document.createDocumentFragment(), lock = previewOnly ? root.ownerDocument.createRange().createContextualFragment(icon('lock')) : null;
     normalized.chapters.forEach((chapter, index) => {
       const item = document.createElement('li');
       const button = document.createElement('button');
@@ -1032,10 +1332,12 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       const title = document.createElement('strong');
       title.textContent = chapter.title;
       button.append(number, title);
-      if (previewOnly && index > 0) { button.classList.add('fr-locked-chapter'); button.append(root.ownerDocument.createRange().createContextualFragment(icon('lock'))); }
+      if (previewOnly && index > 0) { button.classList.add('fr-locked-chapter'); button.append(lock.cloneNode(true)); }
       item.append(button);
-      chapterList.append(item);
+      contents.append(item);
     });
+    chapterList.replaceChildren(contents);
+    currentChapterButton = null;
     closePanels();
     setChrome(true);
     searchHighlight = ''; bookSearch.value = ''; searchResults.replaceChildren();
@@ -1045,8 +1347,12 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     bookElement.focus({ preventScroll: true });
     const openedBook=book;
     if(document.fonts?.check(`${settings.fontSize}px Newsreader`)) revealBook();
-    else document.fonts?.load(`${settings.fontSize}px Newsreader`).then(()=>{if(isOpen&&book===openedBook){reflow(true);revealBook();}}).catch(()=>{});
-    announcement.textContent = `${book.title || 'Book'} opened. ${normalized.chapters[pages[pageIndex]?.chapterIndex || 0].title}.`;
+    else if(document.fonts){
+      // Pages measured with the fallback face are discarded once the book face arrives.
+      fontPending = true;
+      document.fonts.load(`${settings.fontSize}px Newsreader`).then(()=>{if(isOpen&&book===openedBook){fontPending=false;layouts.clear();reflow(true);revealBook();}}).catch(()=>{}).finally(()=>{if(book===openedBook){fontPending=false;scheduleBackground();}});
+    }
+    announcement.textContent = `${book.title || 'Book'} opened. ${normalized.chapters[currentPage?.chapterIndex || 0].title}.`;
   }
 
   function close(notify = true) {
@@ -1062,7 +1368,9 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     clearTimeout(warmTimer);
     abortTurn();
     curlRenderer?.dispose(); curlRenderer = null; curlUnavailable = false;
-    clearTimeout(resizeTimer);
+    clearTimeout(resizeTimer); clearTimeout(fontTimer); clearTimeout(searchTimer); resizeTimer = fontTimer = 0;
+    cancelBackground();
+    layouts.clear(); layout = null; currentPage = null; searchIndex = []; wordCache.clear();
     closePanels();
     root.hidden = true;
     controls.unmount();
@@ -1096,7 +1404,7 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
     document.removeEventListener('focusin', onFocusIn);
     spreadInput.removeEventListener('change', onSpreadChange);
     tapInput.removeEventListener('change', onTapToTurnChange);
-    bookSearch.removeEventListener('input', searchBook);
+    bookSearch.removeEventListener('input', onSearchInput);
     range.removeEventListener('input', onRangeInput);
     range.removeEventListener('change', onRangeChange);
     window.removeEventListener('resize', onResize);

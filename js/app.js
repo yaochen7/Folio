@@ -8,7 +8,9 @@ import {createMembershipService,previewLimit,membershipKey,ownershipKey,bookPric
 import {createMembershipDialog} from './membership-ui.js';
 import {accountPage} from './account-page.js';
 import {publisherPage} from './publisher-ui.js';
-import {parseManuscript,decoratePublication,readPublicationCache,cachePublication,publicationCacheKey,shareUrl} from './publishing.js';
+import {parseManuscript,decoratePublication,publicationDetails,readPublicationCache,cachePublications,migrateLegacyPublications,publicationCacheKey,shareUrl,manuscriptBytes,sizeLabel,BOOK_SIZE_LABEL} from './publishing.js';
+import {MAX_BOOK_BYTES} from './publication-limits.js';
+import {createBookStore} from './book-store.js';
 
 const main=document.querySelector('#main-content');
 const dialog=document.querySelector('#account-dialog');
@@ -19,8 +21,8 @@ const searchClear=searchBar.querySelector('.search-clear');
 function readLibraryView(){try{const value=JSON.parse(localStorage.getItem('folio.library.view.v1')||'{}');return{layout:value.layout==='list'?'list':'grid',sort:value.sort==='title'?'title':'recent'};}catch{return{layout:'grid',sort:'recent'};}}
 const libraryView=readLibraryView();
 function saveLibraryView(){try{localStorage.setItem('folio.library.view.v1',JSON.stringify(libraryView));}catch{}}
-const state={homeGenre:'All',catalog:[...originalBooks],books:[...originalBooks],publications:[],acquired:[],cloudOwned:new Set(),publicationsLoading:false,ownedLoading:false,publishDraft:{},publishResult:null,publishing:false,publishError:'',user:null,firebase:'loading',googleSignInEnabled:false,emailSignUpEnabled:false,saved:new Set(),progress:{},mutations:{},lastRoute:'#discover',searchQuery:'',searchReturnRoute:'#discover',detailReturnRoute:'#discover',readerBook:null,authMode:'signin',authBusy:false,cloudError:false};
-let libraryUnsubscribe,progressUnsubscribe,publicationUnsubscribe,ownedUnsubscribe,toastTimer,lastActionTarget,ignoreReaderClose=false,authGeneration=0,identityGeneration=0,pendingRouteFocus,accountReturnFocus,draftTimer,shareRequest=0;
+const state={homeGenre:'All',catalog:[...originalBooks],books:[...originalBooks],publications:[],acquired:[],cloudOwned:new Set(),publicationsLoading:false,ownedLoading:false,publishDraft:{},publishDraftReady:false,draftSaved:null,publishResult:null,publishing:false,publishError:'',user:null,firebase:'loading',googleSignInEnabled:false,emailSignUpEnabled:false,saved:new Set(),progress:{},mutations:{},lastRoute:'#discover',searchQuery:'',searchReturnRoute:'#discover',detailReturnRoute:'#discover',readerBook:null,authMode:'signin',authBusy:false,cloudError:false};
+let libraryUnsubscribe,progressUnsubscribe,publicationUnsubscribe,ownedUnsubscribe,toastTimer,lastActionTarget,ignoreReaderClose=false,authGeneration=0,identityGeneration=0,pendingRouteFocus,accountReturnFocus,draftTimer,sizeTimer,manuscriptSize=0,draftDirty=false,draftRequest=0,shareRequest=0,contentRequest=0,readerContent=null,readingRequest=null;
 const pendingProgress=new Map();
 const syncingLibrary=new Map();
 const membership=createMembershipService();
@@ -33,7 +35,7 @@ const canReadFull=book=>Boolean(book&&(plusActive()||ownsBook(book)));
 const membershipFlow=createMembershipDialog({dialog:membershipDialog,service:membership,getUid:()=>state.user?.uid,
  onChange:(_record,context)=>{if(context?.purchase&&context.book)ensureSaved(context.book.id);refreshMembership();},
  onDismiss:({completed,book,wordOffset})=>{
-  const current=state.readerBook&&getBook(state.readerBook);
+  const current=state.readerBook&&readerContent;
   if(current&&(completed||reader.preview===canReadFull(current)))reader.open(current,{wordOffset:Math.max(completed&&book?.id===current.id?wordOffset||0:0,state.progress[current.id]?.wordOffset||0),preview:!canReadFull(current)});
   else if(completed&&book)navigate('#read/'+encodeURIComponent(book.id));
   else if(completed&&!state.readerBook)navigate('#account');
@@ -42,41 +44,187 @@ const membershipFlow=createMembershipDialog({dialog:membershipDialog,service:mem
 function refreshMembership(){
  clearTimeout(membershipTimer);const record=subscription();
  if(record?.active)membershipTimer=setTimeout(()=>refreshMembership(),Math.min(2147483647,record.expiresAt-Date.now()+20));
- if(state.readerBook&&!membershipDialog.open){const book=getBook(state.readerBook);if(book&&reader.preview===canReadFull(book))reader.open(book,{wordOffset:state.progress[book.id]?.wordOffset||0,preview:!canReadFull(book)});}
+ if(state.readerBook&&!membershipDialog.open){const book=readerContent;if(book&&reader.preview===canReadFull(book))reader.open(book,{wordOffset:state.progress[book.id]?.wordOffset||0,preview:!canReadFull(book)});}
  if(!state.readerBook)refreshRouteContent();
 }
-function openMembership(id){const book=id&&getBook(id);membershipFlow.open(book?{book,wordOffset:Math.max(previewLimit(book),state.progress[id]?.wordOffset||0)}:{});}
+function openMembership(id){const book=id&&getBook(id);membershipFlow.open(book?{book,wordOffset:Math.max(previewLimit(contentOf(id)||book),state.progress[id]?.wordOffset||0)}:{});}
 function setMembershipRenewal(renew){try{membership.setRenewal(state.user?.uid,renew);notify(renew?'Your subscription renewal has resumed.':'Renewal cancelled. Your access continues until the end of this period.');}catch(error){notify(error.message);}refreshMembership();}
 function renderProfile(){main.innerHTML=accountPage({user:state.user,saved:state.saved,progress:state.progress,books:state.books,membership:subscription(),cloudError:state.cloudError,publications:state.publications,ownedBooks:state.books.filter(ownsBook)});}
 function refreshBooks(){const map=new Map([...state.catalog,...readPublicationCache(state.user?.uid),...state.acquired,...state.publications].map(book=>[book.id,book]));state.books=[...map.values()];}
-function rememberPublication(book,{persist=true}={}){const safe=decoratePublication(book);if(!safe)throw new Error('This book could not be opened.');if(persist)cachePublication(state.user?.uid,safe);state.acquired=state.acquired.filter(value=>value.id!==safe.id);state.acquired.push(safe);refreshBooks();return safe;}
+// Publications enter the app as details; their text is loaded only when a page needs it.
+function rememberPublications(values){
+ const books=values.map(decoratePublication).filter(Boolean).map(publicationDetails),ids=new Set(books.map(book=>book.id));
+ if(books.length){cachePublications(state.user?.uid,books);state.acquired=[...state.acquired.filter(value=>!ids.has(value.id)),...books];refreshBooks();}
+ return books;
+}
+// A published or edited book (publishBook or updateBook result): the author's list and text cache take the new edition.
+function acceptPublication({book,shareToken}){
+ const full=decoratePublication({...book,shareToken});if(!full?.chapters)throw new Error('This book could not be opened.');
+ const details=publicationDetails(full),known=state.publications.some(value=>value.id===details.id);
+ keepContent(full);headChecks.set(details.id,{revision:details.revision,at:Date.now()});
+ state.publications=known?state.publications.map(value=>value.id===details.id?details:value):[details,...state.publications];
+ state.acquired=state.acquired.filter(value=>value.id!==details.id);
+ cachePublications(state.user?.uid,[details]);refreshBooks();
+ return details;
+}
 function ensureSaved(id){if(state.saved.has(id))return;state.saved.add(id);const uid=state.user?.uid;if(uid)state.mutations[id]={saved:true,updatedAt:Date.now()};persistCache();if(uid)void syncLibraryMutation(uid,id,state.mutations[id]);}
-const draftKey=uid=>'folio.publish-draft.v1.'+(uid?'user.'+encodeURIComponent(uid):'guest');
-function loadPublishDraft(){try{state.publishDraft=JSON.parse(localStorage.getItem(draftKey(state.user?.uid))||'{}')||{};}catch{state.publishDraft={};}}
-function capturePublishDraft(){const form=main.querySelector('#publish-form');if(!form||state.publishing)return;state.publishDraft=Object.fromEntries(new FormData(form));delete state.publishDraft[''];}
-function savePublishDraft(){clearTimeout(draftTimer);try{localStorage.setItem(draftKey(state.user?.uid),JSON.stringify(state.publishDraft));}catch{}}
-function renderPublisher(){main.innerHTML=publisherPage({user:state.user,busy:state.publishing,result:state.publishResult,error:state.publishError,draft:state.publishDraft});if(state.publishing)main.querySelectorAll('#publish-form input,#publish-form textarea,#publish-form select').forEach(input=>input.disabled=true);}
+
+// Book text: a few recent books in memory, the rest in book-store.js, and the cloud for anything newer.
+const bookStore=createBookStore(),loadedBooks=new Map(),settledAt=new Map(),contentLoads=new Map(),contentErrors=new Map(),headChecks=new Map();
+const HEAD_FRESH_MS=15000;
+// Text from earlier versions moves out of localStorage once; the cloud copy remains if this device can't keep it.
+for(const {key,books} of migrateLegacyPublications())void Promise.all(books.map(async book=>(await bookStore.getContent(book.id))?.revision>=book.revision||bookStore.putContent(book.id,{revision:book.revision,book}))).finally(()=>{try{localStorage.removeItem(key);}catch{}});
+function keepLoaded(book){
+ loadedBooks.delete(book.id);loadedBooks.set(book.id,book);
+ for(const id of loadedBooks.keys())if(loadedBooks.size>3&&id!==book.id&&id!==readerContent?.id)loadedBooks.delete(id);
+ return book;
+}
+function keepContent(book){keepLoaded(book);void bookStore.putContent(book.id,{revision:book.revision,book});}
+// The author's own list is watched live; anyone else checks a book's details before trusting a cached copy.
+const headFresh=book=>!book.shareToken||Date.now()-(headChecks.get(book.id)?.at||-Infinity)<HEAD_FRESH_MS||(state.publications.some(value=>value.id===book.id)&&!state.cloudError);
+// A copy that ensureBookContent just settled on is used as is, even an older edition read offline.
+function readableBook(book){
+ if(!book||book.chapters)return book||null;
+ const loaded=loadedBooks.get(book.id);if(!loaded)return null;
+ return Date.now()-(settledAt.get(book.id)||-Infinity)<HEAD_FRESH_MS||loaded.revision>=(book.revision||0)&&headFresh(book)?loaded:null;
+}
+const contentOf=id=>readerContent?.id===id?readerContent:readableBook(getBook(id));
+// A newer edition's details replace the listed ones, so titles and covers follow the author's edits.
+function refreshDetails(value){
+ const current=getBook(value.id);if(!current?.shareToken||(current.revision||0)>value.revision)return;
+ const details={...current,...publicationDetails(value),shareToken:current.shareToken},replace=list=>list.map(book=>book.id===details.id?{...book,...details}:book);
+ state.publications=replace(state.publications);state.acquired=replace(state.acquired);
+ cachePublications(state.user?.uid,[details]);refreshBooks();
+}
+async function latestRevision(book){
+ if(headFresh(book))return headChecks.get(book.id)?.revision??book.revision??0;
+ const details=decoratePublication({...await cloud.getSharedBook(book.id,book.shareToken),shareToken:book.shareToken});
+ if(!details||details.id!==book.id)throw new Error('This book could not be opened.');
+ headChecks.set(book.id,{revision:details.revision,at:Date.now()});
+ if(details.revision>(book.revision||0))refreshDetails(details);
+ return details.revision;
+}
+function ensureBookContent(book){
+ if(!book||book.chapters)return Promise.resolve(book);
+ const id=book.id;if(contentLoads.has(id))return contentLoads.get(id);
+ const load=(async()=>{
+  let revision=book.revision||0,offline=null;
+  try{revision=Math.max(revision,await latestRevision(book));}catch(error){offline=error;}
+  const loaded=loadedBooks.get(id);if(loaded&&loaded.revision>=revision&&!offline)return loaded;
+  const stored=await bookStore.getContent(id),cached=stored&&decoratePublication({...stored.book,shareToken:book.shareToken||stored.book.shareToken});
+  const usable=[cached?.chapters&&cached.id===id?cached:null,loaded].filter(Boolean).sort((a,b)=>b.revision-a.revision)[0];
+  // Without a connection, the copy on this device is still worth reading.
+  if(offline){if(usable)return keepLoaded(usable);throw offline;}
+  if(usable&&usable.revision>=revision)return keepLoaded(usable);
+  try{
+   const full=decoratePublication({...await cloud.getBookContent(id,book.shareToken),shareToken:book.shareToken});
+   if(!full?.chapters||full.id!==id)throw new Error('This book could not be opened.');
+   keepContent(full);headChecks.set(id,{revision:full.revision,at:Date.now()});refreshDetails(full);
+   return full;
+  }catch(error){if(usable)return keepLoaded(usable);throw error;}
+ })().then(result=>{settledAt.set(id,Date.now());contentErrors.delete(id);return result;}).finally(()=>contentLoads.delete(id));
+ contentLoads.set(id,load);return load;
+}
+const contentMessage=error=>error?.code==='folio/share-not-found'?error.message:'We couldn’t load this book right now. Check your connection, then try again.';
+function renderBookLoading(book){main.innerHTML=`<section class="publisher-view shared-loading"><p class="eyebrow">${esc(book.author)}</p><h1>Opening ${esc(book.title)}…</h1><p role="status">Finding every chapter.</p></section>`;}
+// Opens the reader once a publication's text arrives, unless the reader, route or identity moved on.
+function loadReading(id){
+ const book=getBook(id),hash=location.hash,request=++contentRequest,generation=identityGeneration;
+ readingRequest={hash,request};renderBookLoading(book);
+ ensureBookContent(book).then(content=>{
+  if(request!==contentRequest||location.hash!==hash||generation!==identityGeneration||state.readerBook)return;
+  readingRequest=null;openReader(id,content);
+ },error=>{
+  if(request!==contentRequest||location.hash!==hash||generation!==identityGeneration)return;
+  readingRequest=null;contentErrors.set(id,error);renderReadingError(id);focusMain();
+ });
+}
+function renderReadingError(id){const book=getBook(id);main.innerHTML=`<section class="publisher-view shared-error"><p class="eyebrow">${esc(book.title)}</p><h1>We couldn’t open this book.</h1><p role="alert">${esc(contentMessage(contentErrors.get(id)))}</p><button class="pill" type="button" data-action="retry-content" data-book="${esc(id)}">Try again</button><a class="text-action" href="#book/${esc(encodeURIComponent(id))}">Book details ${icon('arrow-right')}</a></section>`;}
+function openReader(id,content){setSearch(false);dialog.close();state.readerBook=id;readerContent=content;reader.open(content,{wordOffset:state.progress[id]?.wordOffset||0,preview:!canReadFull(content)});document.title=`${content.title} — Folio`;}
+function loadDetailsContent(id){
+ const hash=location.hash,request=++contentRequest,generation=identityGeneration;
+ ensureBookContent(getBook(id)).then(()=>{
+  if(request===contentRequest&&location.hash===hash&&generation===identityGeneration)renderPreservingFocus(()=>renderDetails(id));
+ },error=>{
+  if(request!==contentRequest||location.hash!==hash||generation!==identityGeneration)return;
+  contentErrors.set(id,error);renderPreservingFocus(()=>renderDetails(id));
+ });
+}
+/** For the edit form: the author's publication with its chapters, read fresh so its revision can guard the update. */
+async function loadPublicationForEditing(bookId){
+ const uid=state.user?.uid;if(!uid)throw Object.assign(new Error('Sign in to edit your book.'),{code:'folio/not-signed-in'});
+ const {shareToken}=await cloud.getPublicationShare(uid,bookId),full=decoratePublication({...await cloud.getBookContent(bookId,shareToken),shareToken});
+ if(!full?.chapters||full.id!==bookId||full.ownerUid!==uid)throw new Error('This book could not be opened.');
+ if(state.user?.uid===uid){keepContent(full);headChecks.set(bookId,{revision:full.revision,at:Date.now()});refreshDetails(full);}
+ return full;
+}
+
+// Drafts live in book-store.js under one key per identity; an edit of a published book adds its id.
+const draftKey=(uid,bookId)=>(uid?'user.'+encodeURIComponent(uid):'guest')+(bookId?'.edit.'+bookId:'');
+const legacyDraftKey=uid=>'folio.publish-draft.v1.'+(uid?'user.'+encodeURIComponent(uid):'guest');
+const DRAFT_FIELDS=['title','author','description','category','price','kind','manuscript'];
+const cleanDraft=value=>Object.fromEntries(DRAFT_FIELDS.filter(field=>typeof value?.[field]==='string').map(field=>[field,value[field]]));
+function loadPublishDraft(){
+ const uid=state.user?.uid||null,key=draftKey(uid),request=++draftRequest;
+ clearTimeout(draftTimer);draftDirty=false;state.publishDraft={};state.publishDraftReady=false;state.draftSaved=null;
+ void (async()=>{
+  let draft=await bookStore.getDraft(key),legacy=null,saved=null;
+  try{legacy=JSON.parse(localStorage.getItem(legacyDraftKey(uid))||'null');}catch{}
+  // A draft from an earlier version moves out of localStorage once it is stored here.
+  if(!draft&&legacy&&typeof legacy==='object'){draft=legacy;saved=await bookStore.putDraft(key,cleanDraft(legacy));}
+  if(legacy&&saved!==false)try{localStorage.removeItem(legacyDraftKey(uid));}catch{}
+  if(request!==draftRequest)return;
+  state.publishDraft=cleanDraft(draft);state.publishDraftReady=true;state.draftSaved=saved;
+  if(location.hash==='#publish'&&!state.publishResult){const focused=main.contains(document.activeElement)||document.activeElement===document.body;renderPublisher();if(focused)focusMain();}
+ })();
+}
+function capturePublishDraft(){const form=main.querySelector('#publish-form');if(!form||state.publishing||!state.publishDraftReady)return;const draft=cleanDraft(Object.fromEntries(new FormData(form)));if(DRAFT_FIELDS.some(field=>draft[field]!==state.publishDraft[field])){state.publishDraft=draft;draftDirty=true;}}
+async function savePublishDraft(uid=state.user?.uid){
+ clearTimeout(draftTimer);if(!draftDirty||!state.publishDraftReady)return;
+ draftDirty=false;const key=draftKey(uid),saved=await bookStore.putDraft(key,state.publishDraft);
+ if(key===draftKey(state.user?.uid)&&state.draftSaved!==saved){state.draftSaved=saved;updateDraftStatus();}
+}
+function updateDraftStatus(){const status=main.querySelector('#publish-draft-status');if(status)status.textContent=state.draftSaved===false?' · Not saved on this device. Keep a copy of your manuscript before you leave.':'';}
+function updateManuscriptSize(){
+ clearTimeout(sizeTimer);const field=main.querySelector('#publish-text'),label=main.querySelector('#publish-size');if(!field||!label)return;
+ const bytes=manuscriptSize=manuscriptBytes(field.value),over=bytes>MAX_BOOK_BYTES;
+ label.textContent=sizeLabel(bytes)+(over?' · Too large to publish':'');
+ field.setCustomValidity(over?`This manuscript is too large. Keep the book to ${BOOK_SIZE_LABEL} of text or less.`:'');
+}
+// The manuscript is never cut off while typing: its size is measured against the 5 MB limit instead.
+function prepareManuscriptField(){
+ const field=main.querySelector('#publish-text');if(!field)return;
+ field.removeAttribute('maxlength');
+ const note=field.parentElement.querySelector('.publisher-note');
+ if(note&&/450 KB|50 chapters/.test(note.textContent))note.textContent=`Start a chapter with # and its title. Leave a blank line between paragraphs. Up to 1,000 chapters and ${BOOK_SIZE_LABEL}.`;
+ if(!main.querySelector('#publish-size'))field.insertAdjacentHTML('afterend','<p class="publisher-note publisher-size"><span id="publish-size"></span><span id="publish-draft-status" role="status"></span></p>');
+ field.setAttribute('aria-describedby','publish-size');updateManuscriptSize();updateDraftStatus();
+}
+function renderPublisher(){
+ if(state.user&&!state.publishResult&&!state.publishDraftReady){main.innerHTML='<section class="publisher-view shared-loading"><p class="eyebrow">Made by you. Read by anyone.</p><h1>Opening your draft…</h1><p role="status">Finding your manuscript.</p></section>';return;}
+ main.innerHTML=publisherPage({user:state.user,busy:state.publishing,result:state.publishResult,error:state.publishError,draft:state.publishDraft});prepareManuscriptField();
+ if(state.publishing)main.querySelectorAll('#publish-form input,#publish-form textarea,#publish-form select').forEach(input=>input.disabled=true);
+}
 async function submitPublication(form){
  if(state.publishing)return;
  if(!state.user){openAccount();return;}
- capturePublishDraft();savePublishDraft();const uid=state.user.uid,generation=identityGeneration,draft={...state.publishDraft};
+ capturePublishDraft();void savePublishDraft();const uid=state.user.uid,generation=identityGeneration,draft={...state.publishDraft};
  try{
   const chapters=parseManuscript(draft.manuscript),priceCents=Math.round(Number(draft.price)*100);
   if(!Number.isFinite(priceCents)||priceCents<99||priceCents>99999)throw new Error('Choose a book price between $0.99 and $999.99.');
   state.publishing=true;state.publishError='';renderPublisher();
   const result=await cloud.publishBook(uid,{title:String(draft.title||'').trim(),author:String(draft.author||'').trim(),description:String(draft.description||'').trim(),genre:draft.category||'Fiction',category:draft.category||'Fiction',kind:draft.kind||'shape',priceCents,chapters});
   if(state.user?.uid!==uid||generation!==identityGeneration)return;
-  const book=rememberPublication({...result.book,shareToken:result.shareToken},{persist:false});
-  try{cachePublication(uid,book);}catch{ /* The published cloud copy remains available. */ }
-  state.publications=state.publications.filter(value=>value.id!==book.id);state.publications.unshift(book);
+  const book=acceptPublication(result);
   try{membership.grantSharedBook(uid,book.id,{shareId:book.shareToken});}catch{ /* Authors retain cloud access to their own publications. */ }ensureSaved(book.id);
-  state.publishResult=book;state.publishDraft={};savePublishDraft();state.publishing=false;
+  state.publishResult=book;state.publishDraft={};draftDirty=false;state.draftSaved=null;void bookStore.deleteDraft(draftKey(uid));state.publishing=false;
   if(location.hash==='#publish'){renderPublisher();focusMain();}else refreshRouteContent();
   notify('Your book is published. Your story is ready to share.');
  }catch(error){if(state.user?.uid!==uid||generation!==identityGeneration)return;state.publishing=false;state.publishError=error.message||'Your book could not be published. Please try again.';if(location.hash==='#publish'){renderPublisher();const message=main.querySelector('[role="alert"]');if(message){message.tabIndex=-1;message.focus({preventScroll:true});}}}
 }
 async function loadSharedBook(hash){
  const request=++shareRequest,uid=state.user?.uid||null,parts=hash.split('/');
+ const current=()=>request===shareRequest&&location.hash===hash&&(state.user?.uid||null)===uid;
  main.innerHTML='<section class="publisher-view shared-loading"><p class="eyebrow">A story, shared with you.</p><h1>Opening your book…</h1><p role="status">Finding every chapter.</p></section>';
  try{
   if(parts.length!==3)throw new Error('This book link is incomplete. Ask the author for the full link.');
@@ -84,14 +232,18 @@ async function loadSharedBook(hash){
   const value=await cloud.getSharedBook(id,token);
   if(request!==shareRequest||location.hash!==hash)return;
   if((state.user?.uid||null)!==uid){void loadSharedBook(hash);return;}
-  const book=decoratePublication({...value,shareToken:token});if(!book||book.id!==id)throw new Error('This book link could not be opened.');
+  const details=decoratePublication({...value,shareToken:token});if(!details||details.id!==id)throw new Error('This book link could not be opened.');
   // Only a successfully fetched capability may create a shared entitlement.
   if(uid)await cloud.claimSharedBook(uid,id,token);
-  if(request!==shareRequest||location.hash!==hash||(state.user?.uid||null)!==uid)return;
-  if(uid){state.cloudOwned.add(id);rememberPublication(book,{persist:false});try{cachePublication(uid,book);membership.grantSharedBook(uid,id,{shareId:token});}catch{ /* The verified cloud ownership remains available. */ }}
-  else{rememberPublication(book);membership.grantSharedBook(null,id,{shareId:token});}
-  ensureSaved(id);
-  state.detailReturnRoute='#library';navigate('#book/'+encodeURIComponent(id),{replace:true});notify('This book is yours. Every chapter is ready to read.');
+  if(!current())return;
+  headChecks.set(id,{revision:details.revision,at:Date.now()});
+  // Ownership comes first. Keeping the book's text on this device is best effort and never undoes it.
+  if(uid)state.cloudOwned.add(id);
+  try{membership.grantSharedBook(uid,id,{shareId:token});}catch{if(!uid)state.cloudOwned.add(id); /* This visit keeps access when the device can't keep the record. */ }
+  rememberPublications([details]);ensureSaved(id);
+  let ready=true;try{await ensureBookContent(getBook(id));}catch{ready=false;}
+  if(!current())return;
+  state.detailReturnRoute='#library';navigate('#book/'+encodeURIComponent(id),{replace:true});notify(ready?'This book is yours. Every chapter is ready to read.':'This book is yours.');
  }catch(error){
   if(request!==shareRequest||location.hash!==hash)return;
   main.innerHTML=`<section class="publisher-view shared-error"><p class="eyebrow">A story, shared with you.</p><h1>We couldn’t open this book.</h1><p role="alert">${esc(error.message||'The link may be incomplete or unavailable. Ask the author for a new link.')}</p><button class="pill" type="button" data-action="retry-share">Try again</button><a class="text-action" href="#library">My Library ${icon('arrow-right')}</a></section>`;focusMain();
@@ -104,7 +256,7 @@ const storageKey=uid=>'folio.library.v1.'+(uid||'guest');
 function readCache(uid){try{const value=JSON.parse(localStorage.getItem(storageKey(uid))||'{}');return{saved:Array.isArray(value.saved)?value.saved.filter(id=>typeof id==='string'):[],progress:value.progress&&typeof value.progress==='object'?value.progress:{},mutations:value.mutations&&typeof value.mutations==='object'?value.mutations:{}};}catch{return{saved:[],progress:{},mutations:{}};}}
 function persistCache(){try{localStorage.setItem(storageKey(state.user?.uid),JSON.stringify({saved:[...state.saved],progress:state.progress,mutations:state.mutations}));}catch{}}
 function loadCache(uid){const cache=readCache(uid);state.saved=new Set(cache.saved);state.progress=cache.progress;state.mutations=cache.mutations;state.acquired=[];state.cloudOwned=new Set();state.publications=readPublicationCache(uid).filter(book=>uid&&book.ownerUid===uid);refreshBooks();}
-loadCache(null);
+loadCache(null);loadPublishDraft();
 const getBook=id=>state.books.find(book=>book.id===id);
 // The toast joins the top layer, inside any open modal so it stays readable and announced.
 // It moves up rather than cover the control it confirms near the bottom of the screen.
@@ -131,7 +283,7 @@ function renderPreservingFocus(render){
 }
 function refreshRouteContent(){
  if(state.readerBook)return;const hash=location.hash||'#discover';
- if(hash.startsWith('#read/')){renderRoute();return;}
+ if(hash.startsWith('#read/')){if(readingRequest?.hash!==hash)renderRoute();return;}
  if(hash.startsWith('#shared/'))return;
  if(hash==='#publish'){if(!main.querySelector('#publish-form')||state.publishResult)renderPublisher();return;}
  renderPreservingFocus(()=>{if(hash==='#account')renderProfile();else if(hash==='#library')renderLibrary();else if(hash.startsWith('#book/')){let id;try{id=decodeURIComponent(hash.slice(6));}catch{}renderDetails(id);}else if(isSearchRoute(hash)||hash==='#browse')renderSearch();else if(hash==='#home'||hash==='#discover'||hash==='#collections'||!location.hash)renderHome();});
@@ -157,13 +309,17 @@ function renderHome(){
   <section class="library-invitation" aria-labelledby="library-invitation-title"><div class="invitation-sheet folio-glass"><h2 id="library-invitation-title">Your library. Always with you.</h2><p>Save books and pick up on the same page. Guest libraries stay on this device; sign in to keep them across devices.</p><div class="action-row">${state.user?`<a class="pill" href="#library">Open My Library</a><button class="glass-button" type="button" data-action="account">Your account</button>`:`<button class="pill" type="button" data-action="signin">Sign in</button><a class="glass-button" href="#library">Continue as guest</a>`}</div></div></section>
  </div>`;
 }
+// Until a publication's text arrives, its opening lines show a status; the hidden first child keeps it free of the drop cap.
 function renderDetails(id){
  const book=getBook(id);if(!book){if(id?.startsWith('b-')&&(state.firebase==='loading'||state.publicationsLoading||state.ownedLoading))main.innerHTML='<section class="publisher-view"><h1>Opening your book…</h1><p role="status">Finding your library.</p></section>';else renderNotFound();return;}
- const saved=state.saved.has(id),progress=state.progress[id]?.fraction||0,edition=presentation(book),opening=book.chapters[0],first=opening?.paragraphs[0]||'',lead=first.match(/^[\p{Pi}\p{Ps}"']*\S/u)?.[0]||first.charAt(0);
+ // A copy already on this device shows at once; checking for a newer edition happens behind it.
+ const fresh=readableBook(book),loaded=loadedBooks.get(id),content=fresh||(loaded&&loaded.revision>=(book.revision||0)?loaded:null),failed=!content&&contentErrors.get(id);
+ if(!fresh&&!contentErrors.has(id))loadDetailsContent(id);
+ const saved=state.saved.has(id),progress=state.progress[id]?.fraction||0,edition=presentation(book),opening=content?.chapters[0],first=opening?.paragraphs[0]||'',lead=first.match(/^[\p{Pi}\p{Ps}"']*\S/u)?.[0]||first.charAt(0);
  document.querySelector('.folio-glow').style.setProperty('--edition-tint',edition.tint);
- const words=book.chapters.flatMap(chapter=>chapter.paragraphs).join(' ').trim().split(/\s+/).length;
- main.innerHTML=`<section class="detail-view"><div class="detail-layout"><div class="detail-art"><div class="detail-cover">${renderCover(book)}<span class="cover-sheen" aria-hidden="true"></span></div></div><div class="detail-copy"><p class="eyebrow">${esc(book.genre)}</p><h1>${esc(book.title)}</h1><p class="detail-author">${esc(book.author)}</p><p class="detail-description">${esc(edition.blurb)}</p><div class="detail-meta"><span>${esc(book.category||'Fiction')}</span>${Number.isFinite(book.pages)?`<span>${book.pages} pages</span>`:''}<span>${Math.max(1,Math.ceil(words/230))} min read</span></div><div class="action-row"><button class="pill" type="button" data-action="read" data-book="${esc(id)}">${progress>0.001?'Continue reading':'Read sample'}</button><button class="glass-button save-text" type="button" data-action="save" data-book="${esc(id)}" aria-pressed="${saved}">${icon(saved?'check':'plus')} <span>${saved?'In My Library':'Want to Read'}</span></button></div>${progress>0.001?`<p class="detail-progress">${Math.round(progress*100)}% read <button type="button" data-action="restart" data-book="${esc(id)}">Start over</button></p>`:''}</div></div>
- <section class="opening-lines" aria-labelledby="opening-title"><div class="opening-heading"><h2 id="opening-title">Opening lines.</h2><span>Chapter One · ${esc(opening?.title||'')}</span></div><div class="excerpt-paper"><div class="excerpt-text"><p><span class="drop-cap">${esc(lead)}</span>${esc(first.slice(lead.length))}</p>${(opening?.paragraphs.slice(1,3)||[]).map(paragraph=>`<p>${esc(paragraph)}</p>`).join('')}</div><div class="excerpt-fade"><button type="button" data-action="read" data-book="${esc(id)}">Keep reading</button></div></div></section>
+ const words=Number.isSafeInteger(book.wordCount)?book.wordCount:content?content.chapters.flatMap(chapter=>chapter.paragraphs).join(' ').trim().split(/\s+/).length:0;
+ main.innerHTML=`<section class="detail-view"><div class="detail-layout"><div class="detail-art"><div class="detail-cover">${renderCover(book)}<span class="cover-sheen" aria-hidden="true"></span></div></div><div class="detail-copy"><p class="eyebrow">${esc(book.genre)}</p><h1>${esc(book.title)}</h1><p class="detail-author">${esc(book.author)}</p><p class="detail-description">${esc(edition.blurb)}</p><div class="detail-meta"><span>${esc(book.category||'Fiction')}</span>${Number.isFinite(book.pages)?`<span>${book.pages} pages</span>`:''}${words?`<span>${Math.max(1,Math.ceil(words/230))} min read</span>`:''}</div><div class="action-row"><button class="pill" type="button" data-action="read" data-book="${esc(id)}">${progress>0.001?'Continue reading':'Read sample'}</button><button class="glass-button save-text" type="button" data-action="save" data-book="${esc(id)}" aria-pressed="${saved}">${icon(saved?'check':'plus')} <span>${saved?'In My Library':'Want to Read'}</span></button></div>${progress>0.001?`<p class="detail-progress">${Math.round(progress*100)}% read <button type="button" data-action="restart" data-book="${esc(id)}">Start over</button></p>`:''}</div></div>
+ <section class="opening-lines" aria-labelledby="opening-title" aria-busy="${!content&&!failed}"><div class="opening-heading"><h2 id="opening-title">Opening lines.</h2><span>Chapter One${opening?` · ${esc(opening.title)}`:''}</span></div><div class="excerpt-paper">${content?`<div class="excerpt-text"><p><span class="drop-cap">${esc(lead)}</span>${esc(first.slice(lead.length))}</p>${opening.paragraphs.slice(1,3).map(paragraph=>`<p>${esc(paragraph)}</p>`).join('')}</div><div class="excerpt-fade"><button type="button" data-action="read" data-book="${esc(id)}">Keep reading</button></div>`:`<div class="excerpt-text"><span hidden></span><p role="${failed?'alert':'status'}">${failed?'The opening lines didn’t load.':'Opening the first pages…'}</p></div><div class="excerpt-fade">${failed?`<button type="button" data-action="retry-content" data-book="${esc(id)}">Try again</button>`:''}</div>`}</div></section>
  <section class="detail-related"><h2>More from Folio.</h2><div class="book-grid related-grid">${state.catalog.filter(item=>item.id!==id).sort((a,b)=>(b.category===book.category)-(a.category===book.category)).slice(0,4).map(bookCard).join('')}</div></section></section>`;
  const readButton=main.querySelector('.detail-copy [data-action="read"]');
  readButton.textContent=progress>0.001?'Continue reading':canReadFull(book)?'Start reading':'Read free preview';
@@ -182,27 +338,29 @@ function renderSearch(){const entered=isSearchRoute()?state.searchQuery:'',query
 function renderNotFound(){main.innerHTML=`<section class="library-view not-found-view"><div class="library-empty not-found"><h1>This story has moved.</h1><p>There’s another good book waiting for you.</p><a class="pill" href="#discover">Back to Folio</a></div></section>`;}
 const reader=createReader({root:document.querySelector('#reader-root'),onPreviewEnd:openMembership,onProgress:(id,progress)=>{
  if(!Number.isFinite(progress.wordOffset)||!Number.isFinite(progress.fraction))return;
- if(!canReadFull(getBook(id))&&(state.progress[id]?.wordOffset||0)>=previewLimit(getBook(id)))return;
+ const book=contentOf(id)||getBook(id);if(!canReadFull(book)&&(state.progress[id]?.wordOffset||0)>=previewLimit(book))return;
  const value={wordOffset:Math.max(0,Math.floor(progress.wordOffset)),fraction:Math.min(1,Math.max(0,progress.fraction)),updatedAt:Date.now()};
  state.progress[id]=value;persistCache();queueProgress(id,value);
-},onClose:()=>{if(ignoreReaderClose)return;state.readerBook=null;navigation.backTo(state.lastRoute.startsWith('#read/')?'#discover':state.lastRoute);}});
+},onClose:()=>{if(ignoreReaderClose)return;state.readerBook=null;readerContent=null;navigation.backTo(state.lastRoute.startsWith('#read/')?'#discover':state.lastRoute);}});
 const navigation=createNavigation({main,render:renderRoute,captureState:()=>({homeGenre:state.homeGenre,detailReturnRoute:state.detailReturnRoute}),restoreState:saved=>{if(saved){state.homeGenre=saved.homeGenre;state.detailReturnRoute=saved.detailReturnRoute;}}});
 function renderRoute({restored=false,samePage=false}={}){
  const hash=location.hash||'#home';
- if(location.hash!=='#publish'){capturePublishDraft();savePublishDraft();}
+ if(location.hash!=='#publish'){capturePublishDraft();void savePublishDraft();}
  if(!hash.startsWith('#shared/'))shareRequest++;
  document.body.dataset.page=hash.startsWith('#book/')?'book':hash==='#publish'?'publish':hash.startsWith('#shared/')?'shared':hash==='#account'?'account':hash==='#library'?'library':isSearchRoute(hash)||hash==='#browse'?'search':'home';
  const previousFocus=document.activeElement;
  let readId;try{if(hash.startsWith('#read/'))readId=decodeURIComponent(hash.slice(6));}catch{}
- const readingBook=readId&&getBook(readId);
- if(readingBook){if(state.readerBook===readId)return;setSearch(false);dialog.close();state.readerBook=readId;reader.open(readingBook,{wordOffset:state.progress[readId]?.wordOffset||0,preview:!canReadFull(readingBook)});document.title=`${readingBook.title} — Folio`;return;}
+ const readingBook=readId&&getBook(readId),readingContent=readingBook&&state.readerBook!==readId&&readableBook(readingBook);
+ if(readingBook&&state.readerBook===readId)return;
+ if(readingContent){openReader(readId,readingContent);return;}
  if(membershipDialog.open)membershipFlow.close({silent:true});
  document.querySelector('#share-dialog')?.close();
- if(state.readerBook){ignoreReaderClose=true;try{reader.close();}finally{ignoreReaderClose=false;state.readerBook=null;}}
- state.lastRoute=hash;
+ if(state.readerBook){ignoreReaderClose=true;try{reader.close();}finally{ignoreReaderClose=false;state.readerBook=null;readerContent=null;}}
+ // While a book's text loads, the reader keeps the route it will return to.
+ if(!readingBook)state.lastRoute=hash;
  document.title='Folio — A world between the covers';
  document.querySelectorAll('[data-nav]').forEach(link=>{const active=hash==='#collections'?link.dataset.nav==='collections':hash==='#discover'||hash.startsWith('#book/')?link.dataset.nav==='discover':false;if(active)link.setAttribute('aria-current','page');else link.removeAttribute('aria-current');});
- if(hash.startsWith('#read/')){setSearch(false);renderDetails(readId);document.title='Your book — Folio';if(!restored)focusMain();}
+ if(hash.startsWith('#read/')){setSearch(false);if(!readingBook)renderDetails(readId);else if(contentErrors.has(readId))renderReadingError(readId);else loadReading(readId);document.title='Your book — Folio';if(!restored)focusMain();}
  else if(hash.startsWith('#shared/')){setSearch(false);document.title='A book shared with you — Folio';void loadSharedBook(hash);}
  else if(hash==='#publish'){setSearch(false);renderPublisher();document.title='Publish your book — Folio';if(!restored)focusMain();}
  else if(hash==='#library'){setSearch(false);renderLibrary();if(!restored)focusMain();}
@@ -234,12 +392,13 @@ async function handleAuth(user){
  const previousUid=state.user?.uid||null,nextUid=user?.uid||null,identityChanged=previousUid!==nextUid;
  const generation=++authGeneration;flushProgress();libraryUnsubscribe?.();progressUnsubscribe?.();publicationUnsubscribe?.();ownedUnsubscribe?.();
  if(identityChanged&&membershipDialog.open)membershipFlow.close({silent:true});
- if(identityChanged){identityGeneration++;const share=document.querySelector('#share-dialog');share.close();share.querySelector('input').value='';share.querySelector('h2').textContent='Share your book';}
+ // The previous identity's unsaved typing is kept under its own draft key.
+ if(identityChanged){capturePublishDraft();void savePublishDraft(previousUid);identityGeneration++;readingRequest=null;contentErrors.clear();const share=document.querySelector('#share-dialog');share.close();share.querySelector('input').value='';share.querySelector('h2').textContent='Share your book';}
  let closedBook=null;
- if(identityChanged&&state.readerBook){closedBook=state.readerBook;ignoreReaderClose=true;reader.close();ignoreReaderClose=false;state.readerBook=null;}
+ if(identityChanged&&state.readerBook){closedBook=state.readerBook;ignoreReaderClose=true;reader.close();ignoreReaderClose=false;state.readerBook=null;readerContent=null;}
  state.user=user;state.cloudError=false;loadCache(user?.uid);updateHeader();
  state.publicationsLoading=Boolean(user);state.ownedLoading=Boolean(user);
- if(identityChanged){shareRequest++;clearTimeout(draftTimer);state.publishing=false;state.publishResult=null;state.publishError='';loadPublishDraft();if(location.hash==='#publish')renderPublisher();}
+ if(identityChanged){shareRequest++;state.publishing=false;state.publishResult=null;state.publishError='';loadPublishDraft();if(location.hash==='#publish')renderPublisher();}
  refreshMembership();
  if(closedBook)navigate('#book/'+encodeURIComponent(closedBook),{replace:true});
  if(dialog.open)renderAccount('',false,!user);
@@ -249,23 +408,29 @@ async function handleAuth(user){
  publicationUnsubscribe=cloud.watchPublications(user.uid,(values,error)=>{
   if(generation!==authGeneration)return;state.publicationsLoading=false;
   if(error){state.cloudError=true;refreshRouteContent();return;}
-  state.publications=values.map(decoratePublication).filter(Boolean);
-  refreshBooks();
-  for(const book of state.publications){try{cachePublication(user.uid,book);}catch{}ensureSaved(book.id);}
+  // Details only, and no library changes: a book joins the library when it is published or claimed.
+  state.publications=values.map(decoratePublication).filter(Boolean).map(publicationDetails);
+  cachePublications(user.uid,state.publications);
   refreshBooks();refreshMembership();
  });
  ownedUnsubscribe=cloud.watchOwnedBooks(user.uid,(values,error)=>{
   if(generation!==authGeneration)return;state.ownedLoading=false;
   if(error){state.cloudError=true;refreshRouteContent();return;}
   state.cloudOwned=new Set(values.map(book=>book.id));
-  for(const value of values){try{const book=rememberPublication(value,{persist:false});try{cachePublication(user.uid,book);membership.grantSharedBook(user.uid,book.id,{shareId:book.shareToken});}catch{}ensureSaved(book.id);}catch{state.cloudError=true;}}
+  const books=rememberPublications(values);if(books.length<values.length)state.cloudError=true;
+  for(const book of books){try{membership.grantSharedBook(user.uid,book.id,{shareId:book.shareToken});}catch{ /* The verified cloud ownership remains available. */ }ensureSaved(book.id);}
   refreshBooks();refreshMembership();
  });
  if(identityChanged&&!previousUid){
-  const guestOwned=new Set(membership.readOwned(null).filter(record=>record.source==='shared').map(record=>record.bookId));
-  for(const book of readPublicationCache(null).filter(book=>guestOwned.has(book.id)&&book.shareToken))void cloud.claimSharedBook(user.uid,book.id,book.shareToken).then(value=>{
-   if(generation!==authGeneration)return;state.cloudOwned.add(book.id);const safe=rememberPublication({...value,shareToken:book.shareToken},{persist:false});try{cachePublication(user.uid,safe);membership.grantSharedBook(user.uid,book.id,{shareId:book.shareToken});}catch{}ensureSaved(book.id);refreshMembership();
-  }).catch(()=>{if(generation===authGeneration)state.cloudError=true;});
+  // Each shared book a guest opened carries its link token in the ownership record, so no cached text is needed.
+  const guestBooks=new Map(readPublicationCache(null).map(book=>[book.id,book]));
+  for(const record of membership.readOwned(null).filter(record=>record.source==='shared')){
+   const id=record.bookId,token=record.shareId||guestBooks.get(id)?.shareToken;if(!/^b-/.test(id)||!/^[0-9a-f]{64}$/.test(token||''))continue;
+   void cloud.claimSharedBook(user.uid,id,token).then(value=>{
+    if(generation!==authGeneration)return;state.cloudOwned.add(id);rememberPublications([{...value,shareToken:token}]);
+    try{membership.grantSharedBook(user.uid,id,{shareId:token});}catch{ /* The verified cloud ownership remains available. */ }ensureSaved(id);refreshMembership();
+   }).catch(()=>{if(generation===authGeneration)state.cloudError=true;});
+  }
  }
  const guest=readCache(null),guestSnapshot=JSON.stringify(guest),accountCache=readCache(user.uid);
  let firstLibrary=true,firstProgress=true,libraryImported=false,progressImported=false;
@@ -336,8 +501,9 @@ async function submitAuth(form){
 }
 async function googleAuth(){if(state.authBusy||state.firebase!=='ready'||!state.googleSignInEnabled)return;setAuthBusy(true);try{await cloud.signInWithGoogle();dialog.close();notify('Welcome to Folio.');}catch(error){state.authBusy=false;renderAccount(error.message||'Google sign-in didn’t finish. Please try again.',true,true);focusAuthMessage();}finally{setAuthBusy(false);updateHeader();}}
 document.addEventListener('submit',event=>{if(event.target.id==='auth-form'){event.preventDefault();submitAuth(event.target);}else if(event.target.id==='publish-form'){event.preventDefault();void submitPublication(event.target);}});
-main.addEventListener('input',event=>{if(!event.target.closest('#publish-form'))return;capturePublishDraft();clearTimeout(draftTimer);draftTimer=setTimeout(savePublishDraft,450);if(event.target.name==='title'||event.target.name==='author')for(const cover of main.querySelectorAll('.publisher-covers .book-cover')){cover.querySelector('.cover-title').textContent=state.publishDraft.title||'Your story';cover.querySelector('.cover-author').textContent=state.publishDraft.author||'Your name';}});
-main.addEventListener('change',async event=>{if(event.target.id!=='publish-file')return;const file=event.target.files?.[0],form=event.target.closest('form'),uid=state.user?.uid;if(!file)return;try{if(file.size>450000)throw new Error('Choose a text file smaller than 450 KB.');const text=await file.text();if(!form.isConnected||state.user?.uid!==uid)return;form.elements.manuscript.value=text;capturePublishDraft();savePublishDraft();notify('Your manuscript is ready. Review the details, then publish.');}catch(error){notify(error.message||'This file could not be opened.');}finally{event.target.value='';}});
+// A multi-megabyte manuscript is copied for the draft and measured after a pause in typing, not on every key.
+main.addEventListener('input',event=>{const form=event.target.closest('#publish-form');if(!form)return;clearTimeout(draftTimer);draftTimer=setTimeout(()=>{capturePublishDraft();void savePublishDraft();},450);if(event.target.name==='manuscript'){clearTimeout(sizeTimer);sizeTimer=setTimeout(updateManuscriptSize,manuscriptSize>1_000_000?800:250);}if(event.target.name==='title'||event.target.name==='author')for(const cover of main.querySelectorAll('.publisher-covers .book-cover')){cover.querySelector('.cover-title').textContent=form.elements.title.value||'Your story';cover.querySelector('.cover-author').textContent=form.elements.author.value||'Your name';}});
+main.addEventListener('change',async event=>{if(event.target.id!=='publish-file')return;const file=event.target.files?.[0],form=event.target.closest('form'),uid=state.user?.uid;if(!file)return;try{if(file.size>MAX_BOOK_BYTES)throw new Error(`Choose a text file of ${BOOK_SIZE_LABEL} or less.`);const text=await file.text();if(!form.isConnected||state.user?.uid!==uid)return;form.elements.manuscript.value=text;capturePublishDraft();void savePublishDraft();updateManuscriptSize();notify(manuscriptSize>MAX_BOOK_BYTES?`Your manuscript is in, but it’s over ${BOOK_SIZE_LABEL}. Shorten it before publishing.`:'Your manuscript is ready. Review the details, then publish.');}catch(error){notify(error.message||'This file could not be opened.');}finally{event.target.value='';}});
 function placeLibraryMenu(menu){
  const popup=menu.querySelector('.library-book-menu'),anchor=menu.querySelector('summary').getBoundingClientRect();
  const header=document.querySelector('.folio-nav-surface')?.getBoundingClientRect().bottom||0;
@@ -365,7 +531,7 @@ document.addEventListener('click',async event=>{
  if(navLink&&!event.defaultPrevented&&event.button===0&&!event.metaKey&&!event.ctrlKey&&!event.shiftKey&&!event.altKey&&/^#(?:home|discover|collections|library|account|publish|browse|search(?:\?|$)|book\/|read\/|shared\/)/.test(navLink.getAttribute('href'))){event.preventDefault();if(navLink.matches('.nav-back'))navigation.backTo(state.detailReturnRoute);else navigate(navLink.getAttribute('href'),{source:navLink});return;}
  const button=event.target.closest('[data-action]');if(!button)return;const action=button.dataset.action,id=button.dataset.book;
  if(action==='detail'){if(!location.hash.startsWith('#book/')&&!location.hash.startsWith('#read/'))state.detailReturnRoute=location.hash||'#home';navigate('#book/'+encodeURIComponent(id),{source:button});}
- else if(action==='read'){state.lastRoute=location.hash&&!location.hash.startsWith('#read/')?location.hash:'#book/'+id;navigate('#read/'+encodeURIComponent(id));}
+ else if(action==='read'){contentErrors.delete(id);state.lastRoute=location.hash&&!location.hash.startsWith('#read/')?location.hash:'#book/'+id;navigate('#read/'+encodeURIComponent(id));}
  else if(action==='save')toggleSave(id);
  else if(action==='library-layout'){libraryView.layout=libraryView.layout==='grid'?'list':'grid';saveLibraryView();renderPreservingFocus(renderLibrary);}
  else if(action==='library-sort'){libraryView.sort=button.dataset.sort==='title'?'title':'recent';saveLibraryView();renderLibrary();document.querySelector('.library-sort summary')?.focus({preventScroll:true});}
@@ -386,6 +552,7 @@ document.addEventListener('click',async event=>{
  else if(action==='copy-published-link')void copyBookLink(document.querySelector('#published-share-link'));
  else if(action==='new-publication'){state.publishResult=null;state.publishError='';navigate('#publish');}
  else if(action==='retry-share')void loadSharedBook(location.hash);
+ else if(action==='retry-content'){contentErrors.delete(id);headChecks.delete(id);refreshRouteContent();}
  else if(action==='cancel-membership')setMembershipRenewal(false);
  else if(action==='resume-membership')setMembershipRenewal(true);
  else if(action==='reset-account-password'){openAccount();state.authMode='reset';renderAccount();document.querySelector('#auth-email').value=state.user?.email||'';}
@@ -407,9 +574,11 @@ const toastHost=new MutationObserver(()=>{if(!toastElement.hidden)showToast();})
 const shareDialog=document.querySelector('#share-dialog');
 shareDialog.addEventListener('close',()=>{if(shareReturnFocus?.isConnected)shareReturnFocus.focus({preventScroll:true});});
 shareDialog.addEventListener('click',event=>{if(event.target!==shareDialog)return;const rect=shareDialog.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)shareDialog.close();});
-window.addEventListener('pagehide',()=>{flushProgress();capturePublishDraft();savePublishDraft();});
+window.addEventListener('pagehide',()=>{flushProgress();capturePublishDraft();void savePublishDraft();});
+// A hidden page may never come back, so the draft is saved then rather than waiting for the typing pause.
+document.addEventListener('visibilitychange',()=>{if(document.visibilityState==='hidden'){capturePublishDraft();void savePublishDraft();}});
 window.addEventListener('storage',event=>{if(event.key===publicationCacheKey(state.user?.uid)||event.key===null)refreshBooks();if([membershipKey(state.user?.uid),ownershipKey(state.user?.uid),publicationCacheKey(state.user?.uid),null].includes(event.key))refreshMembership();});
-window.addEventListener('online',()=>{if(state.user){const user=state.user;handleAuth(user);for(const [id,progress]of Object.entries(state.progress))queueProgress(id,progress);}});
+window.addEventListener('online',()=>{contentErrors.clear();if(!state.user&&!state.readerBook)refreshRouteContent();if(state.user){const user=state.user;handleAuth(user);for(const [id,progress]of Object.entries(state.progress))queueProgress(id,progress);}});
 document.querySelector('.skip-link').addEventListener('click',event=>{event.preventDefault();main.focus({preventScroll:true});main.scrollIntoView({block:'start',behavior:'instant'});});
 hydrateIcons();navigation.start();
 cloud.subscribeAuth(handleAuth);

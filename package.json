@@ -12,7 +12,8 @@
     "check:navigation": "node --test tests/navigation.browser.test.mjs",
     "check:reader": "node --test tests/reader-controls.browser.test.mjs",
     "check:membership": "node --test tests/membership.browser.test.mjs",
-    "check:publishing": "node --test tests/publishing.browser.test.mjs"
+    "check:publishing": "node --test tests/publishing.browser.test.mjs",
+    "check:rules": "node --test tests/firestore-rules.emulator.test.mjs"
   },
   "engines": {
     "node": ">=20"

@@ -18,31 +18,42 @@ async function capture(page,name){if(!process.env.FOLIO_QA_SCREENSHOTS)return;aw
 
 // One backend is shared by genuinely separate browser contexts. This exercises
 // cloud reads and claims across devices rather than copying localStorage.
+// Like the service, every read except getBookContent returns a book's details without its chapters.
 function backendFixture(){
- const books=new Map(),publications=new Map(),owned=new Map(),library=new Map(),progress=new Map(),calls=[];
- let nextPublicationGate;
- function holdNextPublication(){let release,started;const wait=new Promise(resolve=>release=resolve),received=new Promise(resolve=>started=resolve);nextPublicationGate={wait,started};return{release,received};}
+ const books=new Map(),publications=new Map(),owned=new Map(),library=new Map(),progress=new Map(),calls=[],gates=new Map();
+ function holdNext(action){let release,started;const wait=new Promise(resolve=>release=resolve),received=new Promise(resolve=>started=resolve);gates.set(action,{wait,started});return{release,received};}
+ const holdNextPublication=()=>holdNext('publishBook');
  const bucket=(map,uid)=>{if(!map.has(uid))map.set(uid,new Map());return map.get(uid);};
- const fail=(message='This shared book is unavailable.')=>{throw Object.assign(new Error(message),{status:404});};
+ const fail=(message='This shared book is unavailable.',code='folio/share-not-found',status=404)=>{throw Object.assign(new Error(message),{status,code});};
  function lookup(id,token){const entry=books.get(id);if(!entry||entry.shareToken!==token)fail();return entry;}
+ const details=entry=>{const {chapters,...meta}=entry.book;return meta;};
+ function edition(uid,input,previous){
+  assert.ok(Array.isArray(input.chapters)&&input.chapters.length,'the UI supplies parsed chapters');
+  const chapters=input.chapters,wordCount=chapters.flatMap(chapter=>chapter.paragraphs).reduce((total,p)=>total+p.trim().split(/\s+/u).length,0),now=Date.now();
+  return {id:previous?.id||'b-'+randomUUID(),title:input.title,author:input.author,description:input.description,category:input.category||'Fiction',genre:input.genre||input.category||'Fiction',kind:input.kind||'shape',kicker:'An original story',priceCents:input.priceCents??499,cover:escape(input.title),ownerUid:uid,source:'folio-publication',publishedAt:previous?.publishedAt||now,updatedAt:now,revision:(previous?.revision||0)+1,chapterCount:chapters.length,wordCount,pages:Math.max(1,Math.ceil(wordCount/250)),contentBytes:Buffer.byteLength(JSON.stringify(chapters)),chapters};
+ }
  function dispatch({action,uid,args=[]}){
   calls.push({action,uid,args});
   if(action==='getCatalog')return[];
-  if(action==='getSharedBook')return lookup(...args).book;
+  if(action==='getSharedBook')return details(lookup(...args));
+  if(action==='getBookContent')return lookup(...args).book;
   if(!uid)throw Object.assign(new Error('Sign in to continue.'),{status:403});
   if(action==='publishBook'){
-   const input=args[0],id='b-'+randomUUID(),shareToken=randomBytes(32).toString('hex');
-   assert.ok(Array.isArray(input.chapters)&&input.chapters.length,'the UI supplies parsed chapters');
-   const book={id,title:input.title,author:input.author,description:input.description,category:input.category||'Fiction',genre:input.genre||input.category||'Fiction',kind:input.kind||'quiet',kicker:'An original story',priceCents:input.priceCents??499,pages:3,cover:escape(input.title),chapters:input.chapters,ownerUid:uid,publishedAt:Date.now(),source:'folio-publication'};
-   const entry={book,shareToken};books.set(id,entry);bucket(publications,uid).set(id,{...book,shareToken});return entry;
+   const book=edition(uid,args[0]),shareToken=randomBytes(32).toString('hex'),entry={book,shareToken};
+   books.set(book.id,entry);bucket(publications,uid).set(book.id,entry);return entry;
   }
-  if(action==='watchPublications')return[...bucket(publications,uid).values()];
-  if(action==='watchOwnedBooks')return[...bucket(owned,uid).values()];
+  if(action==='updateBook'){
+   const [id,input,{expectedRevision}={}]=args,entry=bucket(publications,uid).get(id);if(!entry)fail();
+   if(entry.book.revision!==expectedRevision)fail('This book was changed somewhere else. Reopen it to get the latest edition, then make your changes again.','folio/edit-conflict',409);
+   entry.book=edition(uid,input,entry.book);return entry;
+  }
+  if(action==='watchPublications')return[...bucket(publications,uid).values()].map(entry=>({...details(entry),shareToken:entry.shareToken}));
+  if(action==='watchOwnedBooks')return[...bucket(owned,uid).entries()].map(([id,acquiredAt])=>{const entry=books.get(id);return{...details(entry),shareToken:entry.shareToken,acquiredAt};});
   if(action==='getPublicationShare'){
-   const book=bucket(publications,uid).get(args[0]);if(!book)fail();return{book,shareToken:book.shareToken};
+   const entry=bucket(publications,uid).get(args[0]);if(!entry)fail();return{book:details(entry),shareToken:entry.shareToken};
   }
   if(action==='claimSharedBook'){
-   const entry=lookup(...args);bucket(owned,uid).set(entry.book.id,{...entry.book,shareToken:entry.shareToken});return{...entry.book,shareToken:entry.shareToken};
+   const entry=lookup(...args);if(!bucket(owned,uid).has(entry.book.id))bucket(owned,uid).set(entry.book.id,Date.now());return{...details(entry),shareToken:entry.shareToken};
   }
   if(action==='watchLibrary')return[...bucket(library,uid).values()];
   if(action==='saveLibraryBook'){bucket(library,uid).set(args[0],{id:args[0],...args[1]});return null;}
@@ -55,7 +66,7 @@ function backendFixture(){
   let user=window.__folioInitialUser||null,observers=new Set();
   const notify=next=>{user=next;for(const cb of observers)cb(user)};
   window.folioTestAuth=notify;
-  const call=async(action,args=[],uid=user?.uid)=>{const response=await fetch('/__folio_fixture__',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,args,uid})});const result=await response.json();if(!response.ok)throw Object.assign(new Error(result.error),{code:'folio/not-found'});return result.value;};
+  const call=async(action,args=[],uid=user?.uid)=>{const response=await fetch('/__folio_fixture__',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,args,uid})});const result=await response.json();if(!response.ok)throw Object.assign(new Error(result.error),{code:result.code||'folio/not-found'});return result.value;};
   const mine=uid=>{if(!user||uid!==user.uid)throw Error('Wrong account.');};
   const watch=(action,uid,cb)=>{mine(uid);let active=true;call(action,[],uid).then(items=>{if(active)cb(items)}).catch(error=>{if(active)cb(null,error)});return()=>{active=false}};
   export const initFirebase=async()=>({configured:true,user,googleSignInEnabled:false,emailSignUpEnabled:true});
@@ -71,7 +82,9 @@ function backendFixture(){
   export const removeLibraryBook=async(uid,...args)=>{mine(uid);return call('removeLibraryBook',args,uid)};
   export const saveReadingProgress=async(uid,...args)=>{mine(uid);return call('saveReadingProgress',args,uid)};
   export const publishBook=async(uid,...args)=>{mine(uid);return call('publishBook',args,uid)};
+  export const updateBook=async(uid,...args)=>{mine(uid);return call('updateBook',args,uid)};
   export const getSharedBook=(...args)=>call('getSharedBook',args);
+  export const getBookContent=(...args)=>call('getBookContent',args);
   export const getPublicationShare=async(uid,...args)=>{mine(uid);return call('getPublicationShare',args,uid)};
   export const claimSharedBook=async(uid,...args)=>{mine(uid);return call('claimSharedBook',args,uid)};
   export const signOut=async()=>notify(null);
@@ -84,13 +97,18 @@ function backendFixture(){
   await context.addInitScript(identity=>{window.__folioInitialUser=identity},identity||null);
   await context.route('**/js/firebase-service.js',route=>route.fulfill({contentType:'text/javascript',body:adapter}));
   await context.route('**/__folio_fixture__',async route=>{
-   try{const packet=route.request().postDataJSON();if(packet.action==='publishBook'&&nextPublicationGate){const gate=nextPublicationGate;nextPublicationGate=null;gate.started();await gate.wait;}await route.fulfill({json:{value:dispatch(packet)}})}
-   catch(error){await route.fulfill({status:error.status||500,json:{error:error.message}})}
+   try{const packet=route.request().postDataJSON(),gate=gates.get(packet.action);if(gate){gates.delete(packet.action);gate.started();await gate.wait;}await route.fulfill({json:{value:dispatch(packet)}})}
+   catch(error){await route.fulfill({status:error.status||500,json:{error:error.message,code:error.code}})}
   });
  }
- return{attach,books,publications,owned,calls,holdNextPublication};
+ return{attach,books,publications,owned,calls,holdNext,holdNextPublication};
 }
 
+// About 4.5 MB of chapters with quotes, CJK and emoji, over 300 chapters: far past the old 450 KB and 50-chapter limits.
+function largeManuscript(){
+ const paragraph=index=>`Paragraph ${index} carries “quotes”, a CJK phrase 界, and a wave 🌊 across a long line of prose that keeps going. `.repeat(4);
+ return Array.from({length:330},(_,chapter)=>`# Chapter ${chapter+1}\n\n`+Array.from({length:30},(_,index)=>paragraph(index)).join('\n\n')).join('\n\n');
+}
 async function assertFullBook(page,book){
  await page.locator('.fr-book[aria-busy="false"]').waitFor();
  assert.equal(await page.locator('.fr-locked-chapter').count(),0,'all chapters are available to an owner');
@@ -126,7 +144,7 @@ test('published links convey one complete book across accounts and guest devices
    await capture(page,'published-390');
    assert.match(shareUrl,/#shared\/b-[\w-]+\/[a-f0-9]{64}$/);
    const id=shareUrl.split('#shared/')[1].split('/')[0];book=fixture.books.get(id).book;
-   assert.equal(book.ownerUid,author.uid);assert.equal(book.priceCents,499);assert.equal(book.chapters.length,3);
+   assert.equal(book.ownerUid,author.uid);assert.equal(book.priceCents,499);assert.equal(book.chapters.length,3);assert.equal(book.revision,1);
    assert.equal(fixture.calls.filter(call=>call.action==='publishBook').length,1);
    assert.equal(await page.locator('.publish-success img').count(),0,'book text cannot inject markup');
    assert.ok(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
@@ -205,6 +223,124 @@ test('published links convey one complete book across accounts and guest devices
    assert.equal(await page.locator('.publish-success').count(),0,'a completed request from the old identity session cannot show a success screen');
    assert.ok(await page.locator('#publish-form').isVisible());
    assert.equal(await page.locator('#published-share-link').count(),0,'no stale share capability is rendered');
+  });
+  await t.test('a multi-megabyte manuscript stays editable, survives a reload, and publishes whole',async()=>{
+   const {page}=await contextFor(author,1440);await page.goto(base+'#publish');await page.locator('#publish-form').waitFor();
+   await page.locator('#publish-title').fill('A Very Long Voyage');await page.locator('#publish-author').fill('A. Writer');
+   await page.locator('#publish-description').fill('Hundreds of chapters, far beyond the old limit.');
+   const field=page.locator('#publish-text'),size=page.locator('#publish-size'),toast=page.locator('#folio-toast');
+   assert.equal(await field.getAttribute('maxlength'),null,'no character limit can trap typing');
+   assert.match(await page.locator('.publisher-manuscript').innerText(),/1,000 chapters and 5 MB/);
+   await page.locator('#publish-file').setInputFiles({name:'too-large.txt',mimeType:'text/plain',buffer:Buffer.alloc(5_000_001,'a')});
+   await toast.getByText('Choose a text file of 5 MB or less.').waitFor();
+   assert.equal(await field.inputValue(),'','an oversized file changes nothing');
+   const text=largeManuscript();
+   await page.locator('#publish-file').setInputFiles({name:'voyage.txt',mimeType:'text/plain',buffer:Buffer.from(text)});
+   await toast.getByText('Your manuscript is ready.',{exact:false}).waitFor();
+   assert.equal((await field.inputValue()).length,text.length);
+   assert.match(await size.textContent(),/^4\.\d MB of 5 MB$/);
+   // The literal bug: after a large import, typed text was refused.
+   await field.evaluate(element=>{element.focus();element.setSelectionRange(element.value.length,element.value.length);});
+   await page.keyboard.type(' more');
+   assert.ok((await field.inputValue()).endsWith(' more'),'typing continues after a multi-megabyte import');
+   // The typing pause saves the draft; poll what IndexedDB holds before reloading.
+   const storedDraft=()=>page.evaluate(()=>new Promise(resolve=>{const request=indexedDB.open('folio-books');request.onerror=()=>resolve(-1);request.onsuccess=()=>{const db=request.result,get=db.transaction('drafts').objectStore('drafts').get('user.author-a');get.onsuccess=()=>{db.close();resolve(get.result?.manuscript?.length??0);};};}));
+   for(const started=Date.now();await storedDraft()!==text.length+5;await page.waitForTimeout(100))assert.ok(Date.now()-started<10000,'the draft reaches IndexedDB after a pause in typing');
+   assert.equal(await page.evaluate(()=>Object.keys(localStorage).filter(key=>key.startsWith('folio.publish-draft')).length),0);
+   await page.reload();await page.locator('#publish-form').waitFor();
+   assert.equal((await field.inputValue()).length,text.length+5,'the draft is kept on this device, not in localStorage');
+   // Over the limit, the size says so and the form refuses to publish.
+   const publishes=fixture.calls.filter(call=>call.action==='publishBook').length;
+   await field.evaluate((element,extra)=>{element.value+=extra;element.dispatchEvent(new Event('input',{bubbles:true}));},'\n\n'+'x'.repeat(600_000));
+   await size.getByText('Too large to publish',{exact:false}).waitFor();
+   await page.getByRole('button',{name:'Publish book',exact:true}).click();await page.waitForTimeout(200);
+   assert.equal(fixture.calls.filter(call=>call.action==='publishBook').length,publishes);
+   assert.ok(await field.evaluate(element=>element.validity.customError));
+   await field.evaluate((element,value)=>{element.value=value;element.dispatchEvent(new Event('input',{bubbles:true}));},text+' more');
+   await page.waitForFunction(()=>/^4\.\d MB of 5 MB$/.test(document.querySelector('#publish-size').textContent));
+   await page.getByRole('button',{name:'Publish book',exact:true}).click();await page.locator('.publish-success').waitFor({timeout:60000});
+   const input=fixture.calls.filter(call=>call.action==='publishBook').at(-1).args[0],bytes=Buffer.byteLength(JSON.stringify(input.chapters));
+   assert.equal(input.chapters.length,330);assert.ok(bytes>4_000_000&&bytes<=5_000_000,`stored size ${bytes}`);
+   assert.match(input.chapters.at(-1).paragraphs.at(-1),/ more$/);
+   assert.equal(await page.locator('#publish-text').count(),0);
+   await page.locator('#main-content').getByRole('button',{name:'Publish another book'}).click();
+   await page.locator('#publish-form').waitFor();assert.equal(await field.inputValue(),'','publishing clears the stored draft');
+  });
+  await t.test('a publication arrives as details and loads its text only when opened',async()=>{
+   const identity={uid:'lazy-reader',email:'lazy@example.test',displayName:'A Patient Reader'};
+   const {page}=await contextFor(identity,1440);await page.goto(shareUrl);await page.locator('.book-ownership-label').waitFor();
+   const downloads=()=>fixture.calls.filter(call=>call.action==='getBookContent').length;
+   const {page:device}=await contextFor(identity,390),before=downloads();
+   await device.goto(base+'#library');await device.locator(`.library-book[data-book-id="${book.id}"]`).waitFor();
+   assert.equal(downloads(),before,'listing an owned book never downloads its text');
+   const gate=fixture.holdNext('getBookContent');
+   await device.locator(`.library-book[data-book-id="${book.id}"] [data-action="read"]`).first().click();await gate.received;
+   await device.getByRole('status').filter({hasText:'Finding every chapter.'}).waitFor();
+   assert.equal(await device.locator('#main-content h1').textContent(),`Opening ${book.title}…`);
+   gate.release();await assertFullBook(device,book);
+   assert.equal(downloads(),before+1);
+   await device.keyboard.press('Escape');await device.goto(base+'#book/'+book.id);await device.locator('.excerpt-text .drop-cap').waitFor();
+   assert.equal(downloads(),before+1,'the opening lines reuse the text already on this device');
+  });
+  await t.test('link holders get the new edition the next time they open the book',async()=>{
+   const {page:guest}=await contextFor(null,390);await guest.goto(shareUrl);await guest.locator('.book-ownership-label').waitFor();
+   await guest.locator('.detail-copy [data-action="read"]').click();await assertFullBook(guest,book);
+   const {page:writer}=await contextFor(author,1440);await writer.goto(base+'#account');await writer.locator('.profile-view').waitFor();
+   const input={title:'The Quiet Ledger, Revised',author:book.author,description:book.description,category:book.category,kind:book.kind,priceCents:book.priceCents,chapters:[...book.chapters,{title:'A new edition',paragraphs:['The author returned with one more chapter for everyone holding the link.']}]};
+   const update=expectedRevision=>writer.evaluate(async({uid,id,input,expectedRevision})=>{const service=await import('/js/firebase-service.js');try{return (await service.updateBook(uid,id,input,{expectedRevision})).book.revision;}catch(error){return error.code;}},{uid:author.uid,id:book.id,input,expectedRevision});
+   assert.equal(await update(1),2);assert.equal(await update(1),'folio/edit-conflict','a stale edit is refused');
+   const edited=fixture.books.get(book.id).book;book=edited;
+   await guest.goto(base+'#library');await guest.reload();
+   await guest.locator(`.library-book[data-book-id="${book.id}"] [data-action="read"]`).first().click();
+   await assertFullBook(guest,edited);
+   await guest.locator('.fr-menu-toggle').click();await guest.locator('.fr-search-toggle').click();
+   await guest.locator('.fr-book-search').fill('one more chapter');
+   assert.ok(await guest.locator('.fr-search-results button').count()>0,'the reader shows the new chapter');
+   await guest.keyboard.press('Escape');await guest.keyboard.press('Escape');
+   await guest.goto(base+'#library');await guest.locator('.library-book h2').filter({hasText:'The Quiet Ledger, Revised'}).waitFor({state:'attached'});
+   // The device replaced its copy: without a connection the new edition still opens.
+   const downloads=fixture.calls.filter(call=>call.action==='getBookContent').length;
+   await guest.route('**/__folio_fixture__',route=>route.abort());await guest.reload();
+   await guest.locator(`.library-book[data-book-id="${book.id}"] [data-action="read"]`).first().click();
+   await assertFullBook(guest,edited);
+   assert.equal(fixture.calls.filter(call=>call.action==='getBookContent').length,downloads);
+  });
+  await t.test('a guest owns a shared book even when this device cannot store its text',async()=>{
+   const unavailable=()=>Object.defineProperty(window,'indexedDB',{configurable:true,get(){return undefined;}});
+   const full=()=>{IDBObjectStore.prototype.put=function(){throw new DOMException('The quota has been exceeded.','QuotaExceededError');};};
+   for(const blocked of [unavailable,full]){
+    const {context,page}=await contextFor(null,390);await context.addInitScript(blocked);
+    await page.goto(shareUrl);await page.locator('.book-ownership-label').getByText('Owned',{exact:false}).waitFor();
+    const owned=await page.evaluate(key=>JSON.parse(localStorage.getItem(key)),ownedKey());
+    assert.equal(owned.books.filter(record=>record.bookId===book.id&&record.source==='shared').length,1,'ownership never depends on caching the text');
+    await page.locator('.detail-copy [data-action="read"]').click();await assertFullBook(page,book);
+   }
+   const {context,page}=await contextFor(author,1440);await context.addInitScript(full);
+   await page.goto(base+'#publish');await page.locator('#publish-form').waitFor();
+   await page.locator('#publish-text').fill('# A draft\n\nThat this device cannot keep.');
+   await page.locator('#publish-draft-status').getByText('Not saved on this device',{exact:false}).waitFor();
+  });
+  await t.test('book text and drafts move out of localStorage once',async()=>{
+   const entry=fixture.books.get(book.id),{revision,...legacy}=entry.book;
+   const {context,page}=await contextFor(null,390);
+   await context.addInitScript(seed=>{if(sessionStorage.getItem('seeded'))return;sessionStorage.setItem('seeded','1');for(const [key,value] of seed)localStorage.setItem(key,value);},[
+    ['folio.books.v1.guest',JSON.stringify([{...legacy,shareToken:entry.shareToken}])],
+    [ownedKey(),JSON.stringify({version:1,books:[{bookId:book.id,source:'shared',acquiredAt:Date.now(),shareId:entry.shareToken}]})],
+    ['folio.library.v1.guest',JSON.stringify({saved:[book.id],progress:{},mutations:{}})]
+   ]);
+   await page.route('**/__folio_fixture__',route=>route.abort());
+   await page.goto(base+'#library');await page.waitForFunction(()=>localStorage.getItem('folio.books.v1.guest')===null);
+   const details=await page.evaluate(()=>JSON.parse(localStorage.getItem('folio.books.v2.guest')));
+   assert.deepEqual(details.map(value=>[value.id,'chapters' in value]),[[book.id,false]],'only the details stay in localStorage');
+   await page.locator(`.library-book[data-book-id="${book.id}"] [data-action="read"]`).first().click();
+   await assertFullBook(page,{...legacy,chapters:entry.book.chapters});
+   const {context:writerContext,page:writer}=await contextFor(author,1440),key='folio.publish-draft.v1.user.'+author.uid;
+   await writerContext.addInitScript(key=>{if(sessionStorage.getItem('seeded'))return;sessionStorage.setItem('seeded','1');localStorage.setItem(key,JSON.stringify({title:'A draft from before',manuscript:'# Kept\n\nFrom the old draft.'}));},key);
+   await writer.goto(base+'#publish');await writer.locator('#publish-form').waitFor();
+   assert.equal(await writer.locator('#publish-title').inputValue(),'A draft from before');
+   await writer.waitForFunction(key=>localStorage.getItem(key)===null,key);
+   await writer.reload();await writer.locator('#publish-form').waitFor();
+   assert.equal(await writer.locator('#publish-text').inputValue(),'# Kept\n\nFrom the old draft.');
   });
   await t.test('invalid, missing, and unrelated links never grant ownership',async()=>{
    for(const hash of [`#shared/${book.id}/${'0'.repeat(64)}`,'#shared/b-missing/'+('1'.repeat(64)),`#shared/${book.id}/bad`]){

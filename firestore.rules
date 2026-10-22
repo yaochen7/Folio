@@ -46,10 +46,20 @@ service cloud.firestore {
       return token is string && token.matches('^[0-9a-f]{64}$');
     }
 
-    function folioPublicationValid(data, bookId) {
+    function folioPublicationShare(bookId, token) {
+      return /databases/$(database)/documents/folioCatalog/$(bookId)/shares/$(token);
+    }
+
+    function folioPublicationAuthorCopy(bookId) {
+      return /databases/$(database)/documents/folioUsers/$(request.auth.uid)/publications/$(bookId);
+    }
+
+    // Both heads hold the same metadata. The manuscript is stored once, as parts under the share.
+    function folioPublicationHead(data, bookId) {
       return folioPublicationId(bookId)
         && data.keys().hasAll(['bookId', 'ownerUid', 'title', 'author', 'genre', 'kind', 'kicker',
-          'description', 'category', 'priceCents', 'contentJson', 'publishedAt'])
+          'description', 'category', 'priceCents', 'publishedAt', 'updatedAt', 'revision', 'partCount', 'contentBytes',
+          'chapterCount', 'wordCount'])
         && data.bookId == bookId
         && data.ownerUid is string && data.ownerUid.size() > 0 && data.ownerUid.size() <= 128
         && folioPublicationOwner(data.ownerUid)
@@ -61,36 +71,112 @@ service cloud.firestore {
         && data.description is string && data.description.size() <= 3000
         && data.category is string && data.category.size() <= 80
         && data.priceCents is int && data.priceCents >= 99 && data.priceCents <= 99999
-        && data.contentJson is string && data.contentJson.size() > 2
-        && data.contentJson.toUtf8().size() <= 450000
-        && data.publishedAt == request.time;
+        && data.publishedAt is timestamp
+        && data.updatedAt == request.time
+        && data.revision is int && data.revision >= 1
+        && data.partCount is int && data.partCount >= 1 && data.partCount <= 6
+        && data.contentBytes is int && data.contentBytes > 2 && data.contentBytes <= 5000000
+        && data.chapterCount is int && data.chapterCount >= 1 && data.chapterCount <= 1000
+        && data.wordCount is int && data.wordCount >= 1 && data.wordCount <= 5000000;
+    }
+
+    function folioPublicationCreated(data) {
+      return data.revision == 1 && data.publishedAt == request.time;
+    }
+
+    // Identity and the first publication time never change. Each edit advances the revision by one.
+    // A legacy head (inline contentJson, no revision) counts as revision 0 and loses contentJson on its first edit.
+    function folioPublicationEdited(data, previous) {
+      return data.bookId == previous.bookId && data.ownerUid == previous.ownerUid
+        && data.publishedAt == previous.publishedAt
+        && data.revision == previous.get('revision', 0) + 1;
+    }
+
+    function folioPublicationPartAt(bookId, token, data, index) {
+      return getAfter(/databases/$(database)/documents/folioCatalog/$(bookId)/shares/$(token)/parts/$(index)).data.revision == data.revision;
+    }
+
+    // Every part the head names must be written with the head's revision in the same request.
+    function folioPublicationParts(bookId, token, data) {
+      return folioPublicationPartAt(bookId, token, data, 0)
+        && (data.partCount <= 1 || folioPublicationPartAt(bookId, token, data, 1))
+        && (data.partCount <= 2 || folioPublicationPartAt(bookId, token, data, 2))
+        && (data.partCount <= 3 || folioPublicationPartAt(bookId, token, data, 3))
+        && (data.partCount <= 4 || folioPublicationPartAt(bookId, token, data, 4))
+        && (data.partCount <= 5 || folioPublicationPartAt(bookId, token, data, 5));
+    }
+
+    // Parts change only in the same request as their share head, by its owner.
+    function folioPublicationPart(data, bookId, index, head) {
+      return data.keys().hasAll(['bookId', 'ownerUid', 'revision', 'index', 'text'])
+        && data.keys().hasOnly(['bookId', 'ownerUid', 'revision', 'index', 'text'])
+        && data.bookId == bookId && head.bookId == bookId
+        && folioPublicationOwner(data.ownerUid) && head.ownerUid == data.ownerUid
+        && head.updatedAt == request.time
+        && data.revision == head.revision
+        && data.index == index && index < head.partCount
+        && data.text is string && data.text.size() > 0 && data.text.toUtf8().size() <= 1000000;
+    }
+
+    function folioPublicationPartRemoved(index, head) {
+      return folioPublicationOwner(head.ownerUid) && head.updatedAt == request.time && index >= head.partCount;
     }
 
     match /folioUsers/{uid}/publications/{bookId} {
       allow read: if folioPublicationOwner(uid);
-      // Both immutable copies must be created together. A published link remains durable.
-      allow create: if folioPublicationOwner(uid) && folioPublicationValid(request.resource.data, bookId)
+      // Both heads and every part are written together. The book ID and link never change.
+      allow create: if folioPublicationOwner(uid) && folioPublicationHead(request.resource.data, bookId)
+        && folioPublicationCreated(request.resource.data)
         && request.resource.data.ownerUid == uid
         && request.resource.data.keys().hasOnly(['bookId', 'ownerUid', 'title', 'author', 'genre', 'kind', 'kicker',
-          'description', 'category', 'priceCents', 'contentJson', 'publishedAt', 'shareToken'])
+          'description', 'category', 'priceCents', 'publishedAt', 'updatedAt', 'revision', 'partCount', 'contentBytes',
+          'chapterCount', 'wordCount', 'shareToken'])
         && folioPublicationToken(request.resource.data.shareToken)
-        && getAfter(/databases/$(database)/documents/folioCatalog/$(bookId)/shares/$(request.resource.data.shareToken)).data
+        && getAfter(folioPublicationShare(bookId, request.resource.data.shareToken)).data
           .diff(request.resource.data).affectedKeys().hasOnly(['shareToken']);
-      allow update, delete: if false;
+      allow update: if folioPublicationOwner(uid) && folioPublicationHead(request.resource.data, bookId)
+        && folioPublicationEdited(request.resource.data, resource.data)
+        && request.resource.data.ownerUid == uid
+        && request.resource.data.keys().hasOnly(['bookId', 'ownerUid', 'title', 'author', 'genre', 'kind', 'kicker',
+          'description', 'category', 'priceCents', 'publishedAt', 'updatedAt', 'revision', 'partCount', 'contentBytes',
+          'chapterCount', 'wordCount', 'shareToken'])
+        && request.resource.data.shareToken == resource.data.shareToken
+        && getAfter(folioPublicationShare(bookId, request.resource.data.shareToken)).data
+          .diff(request.resource.data).affectedKeys().hasOnly(['shareToken']);
+      allow delete: if false;
     }
 
     match /folioCatalog/{bookId}/shares/{shareToken} {
       // An exact unguessable link is the capability; collections cannot be enumerated.
       allow get: if folioPublicationId(bookId) && folioPublicationToken(shareToken);
       allow list: if false;
-      allow create: if folioPublicationValid(request.resource.data, bookId)
+      allow create: if folioPublicationHead(request.resource.data, bookId)
+        && folioPublicationCreated(request.resource.data)
         && request.resource.data.keys().hasOnly(['bookId', 'ownerUid', 'title', 'author', 'genre', 'kind', 'kicker',
-          'description', 'category', 'priceCents', 'contentJson', 'publishedAt'])
+          'description', 'category', 'priceCents', 'publishedAt', 'updatedAt', 'revision', 'partCount', 'contentBytes',
+          'chapterCount', 'wordCount'])
         && folioPublicationToken(shareToken)
-        && getAfter(/databases/$(database)/documents/folioUsers/$(request.auth.uid)/publications/$(bookId)).data.shareToken == shareToken
-        && getAfter(/databases/$(database)/documents/folioUsers/$(request.auth.uid)/publications/$(bookId)).data
-          .diff(request.resource.data).affectedKeys().hasOnly(['shareToken']);
-      allow update, delete: if false;
+        && getAfter(folioPublicationAuthorCopy(bookId)).data.shareToken == shareToken
+        && getAfter(folioPublicationAuthorCopy(bookId)).data.diff(request.resource.data).affectedKeys().hasOnly(['shareToken'])
+        && folioPublicationParts(bookId, shareToken, request.resource.data);
+      allow update: if folioPublicationOwner(resource.data.ownerUid) && folioPublicationHead(request.resource.data, bookId)
+        && folioPublicationEdited(request.resource.data, resource.data)
+        && request.resource.data.keys().hasOnly(['bookId', 'ownerUid', 'title', 'author', 'genre', 'kind', 'kicker',
+          'description', 'category', 'priceCents', 'publishedAt', 'updatedAt', 'revision', 'partCount', 'contentBytes',
+          'chapterCount', 'wordCount'])
+        && getAfter(folioPublicationAuthorCopy(bookId)).data.shareToken == shareToken
+        && getAfter(folioPublicationAuthorCopy(bookId)).data.diff(request.resource.data).affectedKeys().hasOnly(['shareToken'])
+        && folioPublicationParts(bookId, shareToken, request.resource.data);
+      allow delete: if false;
+
+      match /parts/{index} {
+        allow get: if folioPublicationId(bookId) && folioPublicationToken(shareToken) && index.matches('^[0-5]$');
+        allow list: if false;
+        allow create, update: if index.matches('^[0-5]$')
+          && folioPublicationPart(request.resource.data, bookId, int(index), getAfter(folioPublicationShare(bookId, shareToken)).data);
+        allow delete: if index.matches('^[0-5]$')
+          && folioPublicationPartRemoved(int(index), getAfter(folioPublicationShare(bookId, shareToken)).data);
+      }
     }
 
     match /folioUsers/{uid}/owned/{bookId} {

@@ -90,6 +90,8 @@ test('account, preview boundary, and checkout form one complete reading journey'
     export const watchReadingProgress=(uid,callback)=>{queueMicrotask(()=>callback({}));return()=>{}};
     export const watchPublications=(uid,callback)=>{queueMicrotask(()=>callback([]));return()=>{}};
     export const watchOwnedBooks=(uid,callback)=>{queueMicrotask(()=>callback([]));return()=>{}};
+    const unavailable=async()=>{throw Object.assign(new Error('This book link is unavailable. Ask the author for a new link.'),{code:'folio/share-not-found'})};
+    export const publishBook=unavailable,updateBook=unavailable,getSharedBook=unavailable,getBookContent=unavailable,claimSharedBook=unavailable,getPublicationShare=unavailable;
     export const saveLibraryBook=async()=>{};
     export const removeLibraryBook=async()=>{};
     export const saveReadingProgress=async()=>{};
