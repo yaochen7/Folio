@@ -2,6 +2,7 @@ const paths={
  link:'<path d="m10 13 4-4m-7 6-1 1a4 4 0 0 0 6 6l3-3a4 4 0 0 0 0-6m2-4 1-1a4 4 0 0 0-6-6L9 5a4 4 0 0 0 0 6"/>',
  upload:'<path d="M12 16V3m-5 5 5-5 5 5M4 15v5h16v-5"/>',
  plus:'<path d="M12 5v14M5 12h14"/>',
+ pencil:'<path d="M4 20h4L19.5 8.5a2.8 2.8 0 0 0-4-4L4 16v4Z"/><path d="m14 6 4 4"/>',
  list:'<path d="M4 5h16M4 10h16M4 15h10"/><circle cx="5" cy="20" r=".8"/><circle cx="10" cy="20" r=".8"/><circle cx="15" cy="20" r=".8"/>',
  more:'<g fill="currentColor" stroke="none"><circle cx="5" cy="12" r="2.3"/><circle cx="12" cy="12" r="2.3"/><circle cx="19" cy="12" r="2.3"/></g>',
  compass:'<circle cx="12" cy="12" r="9"/><path d="m16 8-2.5 5.5L8 16l2.5-5.5L16 8Z"/>',

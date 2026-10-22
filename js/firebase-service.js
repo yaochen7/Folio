@@ -1,4 +1,6 @@
 /** Firebase is optional: a missing config never creates an account or loads the SDK. */
+import { MAX_BOOK_BYTES, PART_BYTES, MAX_PARTS, MAX_CHAPTERS, MAX_PARAGRAPHS_PER_CHAPTER, MAX_PARAGRAPH_CHARS } from './publication-limits.js';
+
 const SDK_BASE = 'https://www.gstatic.com/firebasejs/13.0.0';
 const CONFIG_URL = new URL('../firebase-config.json', import.meta.url);
 const MAX_WORD_OFFSET = 10_000_000;
@@ -6,7 +8,7 @@ const MAX_TIMESTAMP = 4_102_444_800_000;
 const BOOK_ID = /^[a-z0-9][a-z0-9_-]{0,79}$/;
 const PUBLICATION_ID = /^b-[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const SHARE_TOKEN = /^[0-9a-f]{64}$/;
-const MAX_PUBLICATION_BYTES = 450_000;
+const CONTENT_ATTEMPTS = 3;
 const COVER_KINDS = new Set(['shape', 'atlas', 'blue-hour', 'wild', 'slowly', 'tomorrow']);
 
 async function loadBrowserSdk() {
@@ -25,7 +27,8 @@ const ERROR_MESSAGES = {
   'folio/not-signed-in': 'Sign in to sync your library and reading position.',
   'folio/wrong-account': 'This library belongs to a different account. Please sign in again.',
   'folio/share-not-found': 'This book link is unavailable. Ask the author for a new link.',
-  'folio/book-too-large': 'This book is too large. Use up to 50 chapters and 450 KB of text.',
+  'folio/book-too-large': 'This book is too large. Use up to 1,000 chapters and 5 MB of text.',
+  'folio/edit-conflict': 'This book was changed somewhere else, so your changes weren’t saved yet. Load the latest edition to keep them on top of it.',
   'folio/invalid-book': 'Check the title, author, and chapter text before publishing.',
   'auth/invalid-email': 'Enter a valid email address.',
   'auth/missing-email': 'Enter your email address.',
@@ -126,50 +129,105 @@ function publicationText(input, key, maximum, fallback = '') {
 }
 
 /** Plain text only: published cover HTML is generated locally from the escaped title. */
-function cleanPublication(input) {
+function cleanPublicationMeta(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw serviceError('folio/invalid-book');
   const title = publicationText(input, 'title', 200);
   const author = publicationText(input, 'author', 120);
-  if (!title || !author || !Array.isArray(input.chapters) || !input.chapters.length) throw serviceError('folio/invalid-book');
-  if (input.chapters.length > 50) throw serviceError('folio/book-too-large');
-  const chapters = input.chapters.map(chapter => {
-    const chapterTitle = publicationText(chapter, 'title', 200);
-    if (!chapterTitle || !Array.isArray(chapter.paragraphs) || !chapter.paragraphs.length || chapter.paragraphs.length > 2_000) {
-      throw serviceError('folio/invalid-book');
-    }
-    const paragraphs = chapter.paragraphs.map(paragraph => {
-      if (typeof paragraph !== 'string' || !paragraph.trim() || paragraph.length > 100_000 || /\u0000/.test(paragraph)) {
-        throw serviceError('folio/invalid-book');
-      }
-      return paragraph.trim();
-    });
-    return { title: chapterTitle, paragraphs };
-  });
+  if (!title || !author) throw serviceError('folio/invalid-book');
   const priceCents = input.priceCents ?? 499;
   if (!Number.isInteger(priceCents) || priceCents < 99 || priceCents > 99_999) throw serviceError('folio/invalid-book');
   const kind = input.kind ?? 'shape';
   if (!COVER_KINDS.has(kind)) throw serviceError('folio/invalid-book');
-  const result = { title, author, genre: publicationText(input, 'genre', 80, 'Fiction'), kind,
+  return { title, author, genre: publicationText(input, 'genre', 80, 'Fiction'), kind,
     kicker: publicationText(input, 'kicker', 80, 'An original story'),
-    description: publicationText(input, 'description', 3_000), category: publicationText(input, 'category', 80, 'Fiction'),
-    priceCents, chapters };
-  if (new TextEncoder().encode(JSON.stringify(result)).length > MAX_PUBLICATION_BYTES) throw serviceError('folio/book-too-large');
-  return result;
+    description: publicationText(input, 'description', 3_000), category: publicationText(input, 'category', 80, 'Fiction'), priceCents };
 }
 
-function publicationRecord(bookId, data) {
+/** Size is the UTF-8 length of the chapters' JSON, the same text that is stored in parts. */
+function cleanContent(input) {
+  if (!Array.isArray(input) || !input.length) throw serviceError('folio/invalid-book');
+  if (input.length > MAX_CHAPTERS) throw serviceError('folio/book-too-large');
+  let wordCount = 0;
+  const chapters = input.map(chapter => {
+    const chapterTitle = publicationText(chapter, 'title', 200);
+    if (!chapterTitle || !Array.isArray(chapter.paragraphs) || !chapter.paragraphs.length
+      || chapter.paragraphs.length > MAX_PARAGRAPHS_PER_CHAPTER) throw serviceError('folio/invalid-book');
+    const paragraphs = chapter.paragraphs.map(paragraph => {
+      if (typeof paragraph !== 'string' || !paragraph.trim() || paragraph.length > MAX_PARAGRAPH_CHARS || /\u0000/.test(paragraph)) {
+        throw serviceError('folio/invalid-book');
+      }
+      const text = paragraph.trim();
+      wordCount += text.split(/\s+/u).length;
+      return text;
+    });
+    return { title: chapterTitle, paragraphs };
+  });
+  const json = JSON.stringify(chapters);
+  const contentBytes = new TextEncoder().encode(json).length;
+  if (contentBytes > MAX_BOOK_BYTES) throw serviceError('folio/book-too-large');
+  return { chapters, json, contentBytes, chapterCount: chapters.length, wordCount };
+}
+
+/** Cut text into stored parts of at most PART_BYTES UTF-8 bytes, never inside a code point. */
+export function splitPublicationContent(text) {
+  const parts = [];
+  let start = 0;
+  let bytes = 0;
+  for (let index = 0; index < text.length;) {
+    const code = text.charCodeAt(index);
+    const pair = code >= 0xd800 && code <= 0xdbff && (text.charCodeAt(index + 1) & 0xfc00) === 0xdc00;
+    const width = code < 0x80 ? 1 : code < 0x800 ? 2 : pair ? 4 : 3;
+    if (bytes + width > PART_BYTES) { parts.push(text.slice(start, index)); start = index; bytes = 0; }
+    bytes += width;
+    index += pair ? 2 : 1;
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+const legacyPublication = data => data.contentJson !== undefined;
+const revisionOf = data => (legacyPublication(data) ? 0 : data.revision);
+const boundedCount = (value, maximum) => Number.isSafeInteger(value) && value >= 1 && value <= maximum;
+
+function legacyContent(data) {
+  if (typeof data.contentJson !== 'string') throw serviceError('folio/share-not-found');
+  return cleanContent(JSON.parse(data.contentJson));
+}
+
+/** Metadata only. A legacy head keeps its chapters inline as contentJson and counts as revision 0. */
+function publicationMeta(bookId, data) {
   if (!PUBLICATION_ID.test(bookId) || data?.bookId !== bookId || typeof data.ownerUid !== 'string'
-    || !data.ownerUid || data.ownerUid.length > 128 || data.ownerUid.includes('/') || typeof data.contentJson !== 'string') {
+    || !data.ownerUid || data.ownerUid.length > 128 || data.ownerUid.includes('/')) {
     throw serviceError('folio/share-not-found');
   }
-  let chapters;
-  try { chapters = JSON.parse(data.contentJson); } catch { throw serviceError('folio/share-not-found'); }
-  let book;
-  try { book = cleanPublication({ ...data, chapters }); } catch { throw serviceError('folio/share-not-found'); }
-  const words = book.chapters.reduce((sum, chapter) => sum + chapter.paragraphs.join(' ').split(/\s+/u).length, 0);
-  const cover = book.title.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
-  return { ...book, id: bookId, ownerUid: data.ownerUid, publishedAt: timestampMillis(data.publishedAt),
-    source: 'folio-publication', pages: Math.max(1, Math.ceil(words / 250)), cover };
+  let meta;
+  let counts;
+  try {
+    meta = cleanPublicationMeta(data);
+    counts = legacyPublication(data) ? legacyContent(data) : data;
+  } catch { throw serviceError('folio/share-not-found'); }
+  const revision = revisionOf(data);
+  if (!boundedCount(counts.contentBytes, MAX_BOOK_BYTES) || !boundedCount(counts.chapterCount, MAX_CHAPTERS) || !boundedCount(counts.wordCount, MAX_BOOK_BYTES)
+    || (!legacyPublication(data) && (!boundedCount(revision, Number.MAX_SAFE_INTEGER) || !boundedCount(data.partCount, MAX_PARTS)))) {
+    throw serviceError('folio/share-not-found');
+  }
+  const cover = meta.title.replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+  const publishedAt = timestampMillis(data.publishedAt);
+  return { ...meta, id: bookId, ownerUid: data.ownerUid, cover, source: 'folio-publication', publishedAt,
+    updatedAt: timestampMillis(data.updatedAt) || publishedAt, revision, chapterCount: counts.chapterCount,
+    wordCount: counts.wordCount, pages: Math.max(1, Math.ceil(counts.wordCount / 250)), contentBytes: counts.contentBytes };
+}
+
+/** Head fields shared by the author copy and the link copy; the manuscript itself lives only in parts. */
+function publicationHead(bookId, uid, meta, content, partCount, revision, updatedAt) {
+  return { bookId, ownerUid: uid, ...meta, revision, partCount, contentBytes: content.contentBytes,
+    chapterCount: content.chapterCount, wordCount: content.wordCount, updatedAt };
+}
+
+function contentParts(content) {
+  const parts = splitPublicationContent(content.json);
+  if (parts.length > MAX_PARTS) throw serviceError('folio/book-too-large');
+  return parts;
 }
 
 function validatedConfig(input) {
@@ -471,32 +529,130 @@ export function createFirebaseService({
       shareToken: hex.slice(32) };
   }
 
-  /** Immutable author copy + a get-only capability. A link never exposes a catalog listing. */
+  function partDoc(bookId, shareToken, index) {
+    return sdk.firestore.doc(db, 'folioCatalog', bookId, 'shares', shareToken, 'parts', String(index));
+  }
+
+  /** Create-only and unreadable: the book ID belongs to this link, so no other account can add one. */
+  function bindingDoc(bookId) {
+    return sdk.firestore.doc(db, 'folioCatalog', bookId, 'binding', 'owner');
+  }
+
+  /** Author head + a get-only link head, with the manuscript stored once as parts under the link. */
   async function publishBook(uid, input) {
     try {
       await requireReady();
       assertOwner(uid);
-      const { chapters, ...metadata } = cleanPublication(input);
+      const meta = cleanPublicationMeta(input);
+      const content = cleanContent(input.chapters);
+      const parts = contentParts(content);
       const { bookId, shareToken } = randomPublicationKeys();
-      const data = { bookId, ownerUid: uid, ...metadata, contentJson: JSON.stringify(chapters), publishedAt: sdk.firestore.serverTimestamp() };
+      const time = sdk.firestore.serverTimestamp();
+      const head = { ...publicationHead(bookId, uid, meta, content, parts.length, 1, time), publishedAt: time };
       const batch = sdk.firestore.writeBatch(db);
-      batch.set(userDoc(uid, 'publications', bookId), { ...data, shareToken });
-      batch.set(shareDoc(bookId, shareToken), data);
+      batch.set(userDoc(uid, 'publications', bookId), { ...head, shareToken });
+      batch.set(shareDoc(bookId, shareToken), head);
+      batch.set(bindingDoc(bookId), { ownerUid: uid, shareToken });
+      parts.forEach((text, index) => batch.set(partDoc(bookId, shareToken, index), { bookId, ownerUid: uid, revision: 1, index, text }));
       assertOwner(uid);
       await batch.commit();
       assertOwner(uid);
-      return { book: publicationRecord(bookId, { ...data, publishedAt: Math.trunc(now()) }), shareToken };
+      const written = Math.trunc(now());
+      return { book: { ...publicationMeta(bookId, { ...head, publishedAt: written, updatedAt: written }), chapters: content.chapters }, shareToken };
     } catch (error) { throw mappedError(error); }
   }
 
-  /** Public, exact-document retrieval; possession of the 256-bit token grants this book. */
+  /** The owner replaces the whole edition in place; the book ID and link stay the same. */
+  async function updateBook(uid, bookId, input, options) {
+    const expectedRevision = options?.expectedRevision;
+    let shareRef;
+    try {
+      await requireReady();
+      assertOwner(uid);
+      if (!PUBLICATION_ID.test(bookId)) throw serviceError('folio/share-not-found');
+      if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw serviceError('folio/invalid-input');
+      const meta = cleanPublicationMeta(input);
+      const content = cleanContent(input.chapters);
+      const parts = contentParts(content);
+      const authorRef = userDoc(uid, 'publications', bookId);
+      const saved = await sdk.firestore.runTransaction(db, async transaction => {
+        const authorCopy = await transaction.get(authorRef);
+        assertOwner(uid);
+        if (!authorCopy.exists()) throw serviceError('folio/share-not-found');
+        const { shareToken, ownerUid } = authorCopy.data();
+        assertShare(bookId, shareToken);
+        if (ownerUid !== uid) throw serviceError('folio/share-not-found');
+        shareRef = shareDoc(bookId, shareToken);
+        const linkCopy = await transaction.get(shareRef);
+        assertOwner(uid);
+        if (!linkCopy.exists()) throw serviceError('folio/share-not-found');
+        const current = linkCopy.data();
+        if (current.ownerUid !== uid || current.bookId !== bookId) throw serviceError('folio/share-not-found');
+        // Automatic retries re-read the head, so a competing edit becomes a conflict instead of a silent overwrite.
+        if (revisionOf(current) !== expectedRevision) throw serviceError('folio/edit-conflict');
+        const revision = expectedRevision + 1;
+        const head = publicationHead(bookId, uid, meta, content, parts.length, revision, sdk.firestore.serverTimestamp());
+        if (legacyPublication(current)) head.contentJson = sdk.firestore.deleteField();
+        transaction.update(authorRef, head);
+        transaction.update(shareRef, head);
+        parts.forEach((text, index) => transaction.set(partDoc(bookId, shareToken, index), { bookId, ownerUid: uid, revision, index, text }));
+        const previousParts = !legacyPublication(current) && boundedCount(current.partCount, MAX_PARTS) ? current.partCount : MAX_PARTS;
+        for (let index = parts.length; index < previousParts; index += 1) transaction.delete(partDoc(bookId, shareToken, index));
+        return { shareToken, revision, publishedAt: current.publishedAt, legacy: legacyPublication(current) };
+      });
+      assertOwner(uid);
+      // A book published before bindings existed claims its ID now; an existing binding refuses this quietly.
+      if (saved.legacy) try { await sdk.firestore.setDoc(bindingDoc(bookId), { ownerUid: uid, shareToken: saved.shareToken }); } catch { /* already bound */ }
+      const head = publicationHead(bookId, uid, meta, content, parts.length, saved.revision, Math.trunc(now()));
+      return { book: { ...publicationMeta(bookId, { ...head, publishedAt: saved.publishedAt }), chapters: content.chapters }, shareToken: saved.shareToken };
+    } catch (error) {
+      // Rules reject a stale revision as permission-denied; report it as the conflict it is.
+      if (shareRef && ['permission-denied', 'failed-precondition', 'aborted'].includes(error?.code)) {
+        let latest;
+        try { latest = await sdk.firestore.getDoc(shareRef); } catch { latest = null; }
+        if (latest?.exists() && revisionOf(latest.data()) !== expectedRevision) throw mappedError(serviceError('folio/edit-conflict'));
+      }
+      throw mappedError(error);
+    }
+  }
+
+  /** Public, exact-document retrieval of the link head; possession of the 256-bit token grants this book. */
   async function getSharedBook(bookId, shareToken) {
     try {
       assertShare(bookId, shareToken);
       await requireReady();
       const snapshot = await sdk.firestore.getDoc(shareDoc(bookId, shareToken));
       if (!snapshot.exists()) throw serviceError('folio/share-not-found');
-      return publicationRecord(bookId, snapshot.data());
+      return publicationMeta(bookId, snapshot.data());
+    } catch (error) { throw mappedError(error); }
+  }
+
+  /** Parts are accepted only when all carry the head's revision, so a concurrent edit never mixes editions. */
+  async function getBookContent(bookId, shareToken) {
+    try {
+      assertShare(bookId, shareToken);
+      await requireReady();
+      for (let attempt = 0; attempt < CONTENT_ATTEMPTS; attempt += 1) {
+        const snapshot = await sdk.firestore.getDoc(shareDoc(bookId, shareToken));
+        if (!snapshot.exists()) throw serviceError('folio/share-not-found');
+        const data = snapshot.data();
+        const book = publicationMeta(bookId, data);
+        if (legacyPublication(data)) return { ...book, chapters: legacyContent(data).chapters };
+        const parts = await Promise.all(Array.from({ length: data.partCount }, (_, index) => sdk.firestore.getDoc(partDoc(bookId, shareToken, index))));
+        if (!parts.every(part => part.exists() && part.data().revision === data.revision)) continue;
+        let content;
+        try {
+          const texts = parts.map((part, index) => {
+            const value = part.data();
+            if (value.bookId !== bookId || value.ownerUid !== data.ownerUid || value.index !== index || typeof value.text !== 'string') throw new Error('part');
+            return value.text;
+          });
+          content = cleanContent(JSON.parse(texts.join('')));
+        } catch { throw serviceError('folio/share-not-found'); }
+        const { chapters, contentBytes, chapterCount, wordCount } = content;
+        return { ...book, contentBytes, chapterCount, wordCount, pages: Math.max(1, Math.ceil(wordCount / 250)), chapters };
+      }
+      throw serviceError('aborted');
     } catch (error) { throw mappedError(error); }
   }
 
@@ -507,7 +663,7 @@ export function createFirebaseService({
       const data = item.data();
       assertShare(item.id, data.shareToken);
       if (data.ownerUid !== uid) throw serviceError('folio/share-not-found');
-      return { ...publicationRecord(item.id, data), shareToken: data.shareToken };
+      return { ...publicationMeta(item.id, data), shareToken: data.shareToken };
     }), callback);
   }
 
@@ -521,7 +677,7 @@ export function createFirebaseService({
       const data = snapshot.data();
       assertShare(bookId, data.shareToken);
       if (data.ownerUid !== uid) throw serviceError('folio/share-not-found');
-      return { book: publicationRecord(bookId, data), shareToken: data.shareToken };
+      return { book: publicationMeta(bookId, data), shareToken: data.shareToken };
     } catch (error) { throw mappedError(error); }
   }
 
@@ -555,6 +711,7 @@ export function createFirebaseService({
     let closed = false;
     let sequence = 0;
     const resolved = new Map();
+    const delivered = new Map();
     const stopQuery = watchQuery(uid, () => sdk.firestore.query(sdk.firestore.collection(db, 'folioUsers', uid, 'owned'),
       sdk.firestore.orderBy('acquiredAt', 'desc'), sdk.firestore.limit(500)), snapshot => snapshot.docs.map(item => ({ ...item.data(), id: item.id })), (records, error) => {
       const revision = ++sequence;
@@ -564,24 +721,33 @@ export function createFirebaseService({
       void Promise.all(records.map(async record => {
         assertShare(record.id, record.shareToken);
         if (record.bookId !== record.id || record.source !== 'shared') throw serviceError('folio/share-not-found');
+        // Heads change with every edit, so each snapshot reads them again; only a read still in flight is shared.
         const key = `${record.id}/${record.shareToken}`;
-        if (!resolved.has(key)) resolved.set(key, getSharedBook(record.id, record.shareToken).catch(error => { resolved.delete(key); throw error; }));
-        return { ...await resolved.get(key), shareToken: record.shareToken, acquiredAt: timestampMillis(record.acquiredAt) };
+        if (!resolved.has(key)) {
+          const pending = getSharedBook(record.id, record.shareToken).finally(() => { if (resolved.get(key) === pending) resolved.delete(key); });
+          resolved.set(key, pending);
+        }
+        const book = await resolved.get(key);
+        // A slower, older read never replaces an edition this watch has already delivered.
+        const known = delivered.get(key);
+        const latest = known && known.revision > book.revision ? known : book;
+        delivered.set(key, latest);
+        return { ...latest, shareToken: record.shareToken, acquiredAt: timestampMillis(record.acquiredAt) };
       })).then(books => {
         if (!closed && revision === sequence && currentUser?.uid === uid) callback(books, null);
       }).catch(error => {
         if (!closed && revision === sequence && currentUser?.uid === uid) callback(null, mappedError(error));
       });
     });
-    return () => { closed = true; sequence += 1; resolved.clear(); stopQuery(); };
+    return () => { closed = true; sequence += 1; resolved.clear(); delivered.clear(); stopQuery(); };
   }
 
   return { initFirebase, subscribeAuth, signUp, signIn, signInWithGoogle, sendPasswordReset, signOut,
     watchLibrary, watchReadingProgress, saveLibraryBook, removeLibraryBook, saveReadingProgress, getCatalog, watchCatalog,
-    publishBook, getSharedBook, watchPublications, getPublicationShare, claimSharedBook, watchOwnedBooks };
+    publishBook, updateBook, getSharedBook, getBookContent, watchPublications, getPublicationShare, claimSharedBook, watchOwnedBooks };
 }
 
 const service = createFirebaseService();
 export const { initFirebase, subscribeAuth, signUp, signIn, signInWithGoogle, sendPasswordReset, signOut,
   watchLibrary, watchReadingProgress, saveLibraryBook, removeLibraryBook, saveReadingProgress, getCatalog, watchCatalog,
-  publishBook, getSharedBook, watchPublications, getPublicationShare, claimSharedBook, watchOwnedBooks } = service;
+  publishBook, updateBook, getSharedBook, getBookContent, watchPublications, getPublicationShare, claimSharedBook, watchOwnedBooks } = service;
