@@ -451,7 +451,9 @@ test('two-page spreads pair odd and even pages however the reader gets there',as
   for(let turn=0;turn<4;turn++){const before=await leftFolio();await settledTurn(page,'ArrowLeft');assert.equal(await leftFolio(),before-2,'turning back moves a whole spread');}
   await page.keyboard.press('End');assert.equal(await leftFolio()%2,1,'End shows a spread that starts on an odd page');
   // After a resize the new layout pairs spreads again once its page numbers are known.
+  const previousGeometry=await page.locator('.fr-book').getAttribute('style');
   await page.setViewportSize({width:1280,height:800});
+  await page.waitForFunction(previous=>document.querySelector('.fr-book').getAttribute('style')!==previous,previousGeometry);
   await page.waitForFunction(()=>/^Pages? \d+(–\d+)? of \d+$/.test(document.querySelector('.fr-page-count').textContent),null,{timeout:30000});
   await openMenu(page);await page.locator('.fr-contents-toggle').click();await page.locator('.fr-chapter-list button').nth(5).click();
   assert.equal(await leftFolio()%2,1,'after a resize, Contents opens a spread that starts on an odd page');
