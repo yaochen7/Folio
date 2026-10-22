@@ -2,6 +2,7 @@ import {escapeHtml as esc} from './books.js';
 import {MAX_BOOK_BYTES,MAX_CHAPTERS,MAX_PARAGRAPHS_PER_CHAPTER,MAX_PARAGRAPH_CHARS} from './publication-limits.js';
 
 export const COVER_STYLES=['shape','atlas','blue-hour','wild','slowly','tomorrow'];
+export const CATEGORIES=['Fiction','Ideas','Escape'];
 const bookId=/^b-[a-f0-9-]{36}$/;
 const identity=uid=>uid?'user.'+encodeURIComponent(uid):'guest';
 const LEGACY_PREFIX='folio.books.v1.',CACHE_PREFIX='folio.books.v2.';
@@ -46,6 +47,19 @@ export function parseManuscript(text){
 /** The manuscript text for a book's chapters; parseManuscript(formatManuscript(chapters)) returns the same chapters. */
 export function formatManuscript(chapters){
  return (Array.isArray(chapters)?chapters:[]).map(chapter=>[`# ${chapter.title}`,...chapter.paragraphs.map(paragraph=>paragraph.split('\n').map(escapeLine).join('\n'))].join('\n\n')).join('\n\n');
+}
+
+/** What publishBook and updateBook receive from the form; publishing and editing share these checks. */
+export function publicationInput(draft){
+ const chapters=parseManuscript(draft?.manuscript),priceCents=Math.round(Number(draft?.price)*100);
+ if(!Number.isFinite(priceCents)||priceCents<99||priceCents>99999)throw new Error('Choose a book price between $0.99 and $999.99.');
+ const category=CATEGORIES.includes(draft.category)?draft.category:'Fiction';
+ return {title:String(draft.title||'').trim(),author:String(draft.author||'').trim(),description:String(draft.description||'').trim(),genre:category,category,kind:COVER_STYLES.includes(draft.kind)?draft.kind:'shape',priceCents,chapters};
+}
+/** The form fields for a published book with its chapters, so an edit starts from the edition readers have. */
+export function publicationDraft(book){
+ const cents=Number.isSafeInteger(book.priceCents)&&book.priceCents>=99&&book.priceCents<=99999?book.priceCents:499;
+ return {title:book.title,author:book.author,description:String(book.description||''),category:CATEGORIES.includes(book.category)?book.category:'Fiction',price:(cents/100).toFixed(2),kind:COVER_STYLES.includes(book.kind)?book.kind:'shape',manuscript:formatManuscript(book.chapters)};
 }
 
 const wholeNumber=(value,maximum=Number.MAX_SAFE_INTEGER)=>Number.isSafeInteger(value)&&value>=0&&value<=maximum;

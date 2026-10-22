@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {parseManuscript,formatManuscript,HEADING,manuscriptBytes,contentBytes,sizeLabel,decoratePublication,publicationDetails,readPublicationCache,cachePublications,migrateLegacyPublications,publicationCacheKey,legacyPublicationCacheKey,shareUrl} from '../js/publishing.js';
+import {parseManuscript,formatManuscript,publicationInput,publicationDraft,HEADING,manuscriptBytes,contentBytes,sizeLabel,decoratePublication,publicationDetails,readPublicationCache,cachePublications,migrateLegacyPublications,publicationCacheKey,legacyPublicationCacheKey,shareUrl} from '../js/publishing.js';
 import {MAX_BOOK_BYTES} from '../js/publication-limits.js';
 
 const id='b-12345678-1234-4123-8123-123456789012';
@@ -58,6 +58,21 @@ test('formatting a manuscript is the exact inverse of parsing it',()=>{
   if(!chapters.length)continue;
   assert.deepEqual(parseManuscript(formatManuscript(chapters)),chapters,JSON.stringify(chapters));
  }
+});
+test('publishing and editing send the same checked input, and an edit starts from the published edition',()=>{
+ const draft={title:'  A Title ',author:' Me ',description:' About it. ',category:'Ideas',price:'12.5',kind:'atlas',manuscript:'# One\n\nWords.'};
+ assert.deepEqual(publicationInput(draft),{title:'A Title',author:'Me',description:'About it.',genre:'Ideas',category:'Ideas',kind:'atlas',priceCents:1250,chapters:[{title:'One',paragraphs:['Words.']}]});
+ assert.deepEqual([publicationInput({...draft,category:'Poetry',kind:'unknown'})].map(input=>[input.category,input.genre,input.kind]),[['Fiction','Fiction','shape']]);
+ for(const price of ['0.98','1000','','abc'])assert.throws(()=>publicationInput({...draft,price}),/between \$0\.99 and \$999\.99/);
+ assert.equal(publicationInput({...draft,price:'0.99'}).priceCents,99);assert.equal(publicationInput({...draft,price:'999.99'}).priceCents,99999);
+ assert.throws(()=>publicationInput({...draft,manuscript:'  '}),/Add your manuscript/,'the manuscript is checked before the price');
+ const chapters=[{title:'One',paragraphs:['# Not a heading','Plain.']},{title:'Two',paragraphs:['End.']}];
+ const book={id,title:'Mine',author:'Me',description:'About it.',category:'Escape',kind:'wild',priceCents:999,chapters};
+ const fields=publicationDraft(book);
+ assert.deepEqual(fields,{title:'Mine',author:'Me',description:'About it.',category:'Escape',price:'9.99',kind:'wild',manuscript:'# One\n\n\\# Not a heading\n\nPlain.\n\n# Two\n\nEnd.'});
+ assert.deepEqual(publicationInput(fields),{title:'Mine',author:'Me',description:'About it.',genre:'Escape',category:'Escape',kind:'wild',priceCents:999,chapters},'saving an unchanged edit sends the same book');
+ assert.equal(publicationDraft({...book,priceCents:500}).price,'5.00');assert.equal(publicationDraft({...book,priceCents:99900}).price,'999.00');
+ assert.deepEqual(publicationDraft({...book,priceCents:undefined,category:'Other',kind:'other',description:undefined}),{...fields,price:'4.99',category:'Fiction',kind:'shape',description:''});
 });
 test('publications may arrive as details alone, and chapters are checked when present',()=>{
  const details={id,title:'<img src=x onerror=alert(1)>',author:'Someone',cover:'<script>bad()</script>',kind:'unknown',revision:3,wordCount:1200,pages:5,chapterCount:2,contentBytes:4000,shareToken:'a'.repeat(64),ownerUid:'author'};
