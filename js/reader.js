@@ -847,9 +847,10 @@ export function createReader({ root, onProgress = () => {}, onClose = () => {}, 
       state.animations.push(appearanceContent.animate([contentFrom,{opacity:opening ? 1 : 0,transform:opening ? 'none' : 'translateY(8px)'}],{
         duration:opening ? 320 : 140,delay:opening && !current ? 100 : 0,easing:'cubic-bezier(.22,1,.36,1)',fill:'both'
       }));
-      Promise.all(state.animations.map(animation => animation.finished)).then(() => {
-        if (appearanceMotion === state) finishAppearanceMotion();
-      }).catch(() => { /* A newer action continues from the current surface. */ });
+      // Settle even when an engine never resolves (or cancels) the animations, so the panel can't stay clipped.
+      const settle = () => { if (appearanceMotion === state) finishAppearanceMotion(); };
+      Promise.all(state.animations.map(animation => animation.finished)).then(settle, settle);
+      setTimeout(settle, (opening ? 500 : 420) + (opening && !current ? 100 : 0) + 250);
     } else finishAppearanceMotion();
     (opening ? appearancePanel.querySelector('button') : trigger)?.focus({preventScroll:true});
   }

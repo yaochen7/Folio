@@ -150,7 +150,7 @@ body.reader-open{overflow:hidden;overscroll-behavior:none}html.fr-reader-open{sc
 /* A single reader button unfolds into a shared liquid surface. */
 /* Let the entrance finish without retaining an opacity animation layer: that
    layer would prevent the child backdrop from blurring the site underneath. */
-#reader-root .fr-reader{--fr-liquid-fill:#29364f;--fr-liquid-tint:rgb(24 33 51 / .6);--fr-liquid-opacity:.48;--fr-liquid-solid:#384156;background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;animation-fill-mode:backwards}
+#reader-root .fr-reader{--fr-liquid-fill:#29364f;--fr-liquid-tint:rgb(24 33 51 / .6);--fr-liquid-opacity:.48;--fr-liquid-solid:#384156;--fr-liquid-rest:color-mix(in srgb,var(--fr-liquid-tint) 25%,var(--fr-liquid-fill));background:transparent;backdrop-filter:none;-webkit-backdrop-filter:none;animation-fill-mode:backwards}
 #reader-root .fr-reader::before{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;background:var(--fr-backdrop);backdrop-filter:blur(28px) saturate(1.4);-webkit-backdrop-filter:blur(28px) saturate(1.4);transform:translateZ(0);will-change:transform}
 #reader-root .fr-reader[data-fr-theme="sepia"]{--fr-liquid-fill:#46382d;--fr-liquid-tint:rgb(48 37 27 / .6);--fr-liquid-solid:#4b443d}
 #reader-root .fr-reader[data-fr-theme="night"]{--fr-liquid-fill:#35353c;--fr-liquid-tint:rgb(36 36 44 / .6);--fr-liquid-solid:#35353c}
@@ -165,7 +165,10 @@ body.reader-open{overflow:hidden;overscroll-behavior:none}html.fr-reader-open{sc
 #reader-root .fr-reader[data-fr-chrome="hidden"] .fr-controls-host{opacity:0;pointer-events:none}
 #reader-root .fr-liquid-item{line-height:0}
 #reader-root .fr-liquid-trigger{pointer-events:auto;z-index:2}
-#reader-root .fr-liquid-surface svg[data-gooey-svg]{opacity:var(--fr-liquid-opacity)}
+#reader-root .fr-liquid-surface svg[data-gooey-svg]{opacity:var(--fr-liquid-opacity);transition:opacity .16s ease}
+/* The goo only merges moving pieces; at rest, pills carry its fill so engines that offset SVG filters (Safari) show no ghost bands. */
+#reader-root .fr-liquid-surface:not([data-fr-moving]) svg[data-gooey-svg]{opacity:0}#reader-root .fr-liquid-surface:not([data-fr-moving]) button::before{background-color:var(--fr-liquid-rest)}
+@supports not (color:color-mix(in srgb,red,red)){#reader-root .fr-reader{--fr-liquid-rest:var(--fr-liquid-solid)}}
 #reader-root .fr-liquid-surface .fr-liquid-round,#reader-root .fr-liquid-surface .fr-liquid-row{position:relative;inset:auto;display:flex;align-items:center;justify-content:center;height:var(--fr-control-size);min-height:var(--fr-control-size);border:0;border-radius:999px;background:transparent;box-shadow:none;color:#fff;padding:0;touch-action:manipulation;isolation:isolate}
 /* The transparent liquid silhouette handles merging; this thin material layer
    adds real backdrop blur and a specular rim without filtering the labels. */
@@ -201,8 +204,8 @@ body.reader-open{overflow:hidden;overscroll-behavior:none}html.fr-reader-open{sc
 #reader-root .fr-progress-label{font-size:12px;color:var(--fr-control-muted)}
 #reader-root .fr-position-controls .fr-progress-range{height:44px;min-height:44px}
 #reader-root .fr-position-controls .fr-progress-range::-webkit-slider-thumb{opacity:1}
-@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){#reader-root .fr-liquid-surface button::before{background:var(--fr-liquid-solid)}}
-@media(prefers-reduced-transparency:reduce),(prefers-contrast:more){#reader-root .fr-reader{--fr-liquid-fill:#303748;--fr-liquid-opacity:1}#reader-root .fr-reader::before{background:#181b2c;backdrop-filter:none;-webkit-backdrop-filter:none}#reader-root .fr-reader[data-fr-theme="sepia"]{--fr-liquid-fill:#41392f}#reader-root .fr-reader[data-fr-theme="night"]{--fr-liquid-fill:#303036}#reader-root .fr-liquid-surface button::before{background:var(--fr-liquid-solid);backdrop-filter:none;-webkit-backdrop-filter:none}}
+@supports not ((backdrop-filter:blur(1px)) or (-webkit-backdrop-filter:blur(1px))){#reader-root .fr-reader{--fr-liquid-rest:var(--fr-liquid-solid)}#reader-root .fr-liquid-surface button::before{background:var(--fr-liquid-solid)}}
+@media(prefers-reduced-transparency:reduce),(prefers-contrast:more){#reader-root .fr-reader{--fr-liquid-fill:#303748;--fr-liquid-opacity:1;--fr-liquid-rest:var(--fr-liquid-solid)}#reader-root .fr-reader::before{background:#181b2c;backdrop-filter:none;-webkit-backdrop-filter:none}#reader-root .fr-reader[data-fr-theme="sepia"]{--fr-liquid-fill:#41392f}#reader-root .fr-reader[data-fr-theme="night"]{--fr-liquid-fill:#303036}#reader-root .fr-liquid-surface button::before{background:var(--fr-liquid-solid);backdrop-filter:none;-webkit-backdrop-filter:none}}
 @media(forced-colors:active){#reader-root .fr-liquid-surface svg[data-gooey-svg],#reader-root .fr-liquid-surface svg[data-gooey-overlay]{display:none}#reader-root .fr-liquid-surface .fr-liquid-round,#reader-root .fr-liquid-surface .fr-liquid-row{background:ButtonFace;color:ButtonText;border:1px solid ButtonText}}
 @media(forced-colors:active){#reader-root .fr-reader::before{background:Canvas;backdrop-filter:none;-webkit-backdrop-filter:none}}
 @media(forced-colors:active){#reader-root .fr-liquid-surface button::before{display:none}}

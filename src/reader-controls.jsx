@@ -9,7 +9,7 @@ const closeMotion={duration:420,ease:'cubic-bezier(.32,0,.28,1)'};
 const Glyph=({name})=><span className="fr-liquid-glyph" aria-hidden="true" dangerouslySetInnerHTML={{__html:icon(name)}}/>;
 
 function ReadingControls({model}){
- const {expanded,width,height,step,size,percentage,previousDisabled,nextDisabled}=model;
+ const {expanded,moving,width,height,step,size,percentage,previousDisabled,nextDisabled}=model;
  const motion=expanded?openMotion:closeMotion;
  const anchor={position:'absolute',left:width-size,top:height-size};
  const rows=[
@@ -17,7 +17,7 @@ function ReadingControls({model}){
   {action:'search',label:'Search this book',glyph:<Glyph name="search"/>},
   {action:'appearance',label:'Themes & text',glyph:<span className="fr-aa" aria-hidden="true">Aa</span>}
  ];
- return <div className="fr-liquid-surface" data-fr-expanded={expanded?'true':'false'} style={{'--fr-control-size':`${size}px`,'--fr-motion-duration':`${motion.duration}ms`,'--fr-motion-ease':motion.ease}}>
+ return <div className="fr-liquid-surface" data-fr-expanded={expanded?'true':'false'} data-fr-moving={moving?'true':undefined} style={{'--fr-control-size':`${size}px`,'--fr-motion-duration':`${motion.duration}ms`,'--fr-motion-ease':motion.ease}}>
   <Liquid blur={6} contrast={18} fill="var(--fr-liquid-fill)" style={{width,height,pointerEvents:'none'}}>
    <div id="fr-reading-actions" className="fr-liquid-actions" role="group" aria-label="Reading tools" aria-hidden={!expanded} inert={!expanded} style={{position:'absolute',inset:0,pointerEvents:'none'}}>
    {rows.map((row,index)=><Liquid.Item key={row.action} effect="morph" className="fr-liquid-item" style={{...anchor,pointerEvents:expanded?'auto':'none'}} x={expanded?size-width:0} y={expanded?-(3-index)*step:0} transition={motion} delay={expanded?(2-index)*26:index*18}>
@@ -47,7 +47,7 @@ function ReadingControls({model}){
 // A small React root owns just the liquid controls. The paginated reader keeps
 // its existing DOM and word-offset model. Unmounting also stops library motion.
 export function createReadingControls(host,reader){
- let root,observer;
+ let root,observer,settle;
  let model={expanded:false,percentage:0,previousDisabled:true,nextDisabled:false,width:252,height:238,step:62,size:52};
  function render(){if(root)flushSync(()=>root.render(<ReadingControls model={model}/>));}
  function resize(){
@@ -67,8 +67,13 @@ export function createReadingControls(host,reader){
    observer=new ResizeObserver(resize);observer.observe(reader);
   },
   update(values){if(Object.entries(values).every(([key,value])=>model[key]===value))return;model={...model,...values};render();},
-  setExpanded(expanded){if(model.expanded===expanded)return;model={...model,expanded};reader.dataset.frControls=expanded?'expanded':'collapsed';render();},
+  setExpanded(expanded){
+   if(model.expanded===expanded)return;
+   // The merging goo only shows while pieces move; at rest each pill carries its own fill.
+   clearTimeout(settle);model={...model,expanded,moving:true};reader.dataset.frControls=expanded?'expanded':'collapsed';render();
+   settle=setTimeout(()=>{model={...model,moving:false};render();},(expanded?openMotion:closeMotion).duration+160);
+  },
   get expanded(){return Boolean(root&&model.expanded);},
-  unmount(){observer?.disconnect();observer=null;if(root){root.unmount();root=null;}reader.dataset.frControls='collapsed';model={...model,expanded:false};}
+  unmount(){clearTimeout(settle);observer?.disconnect();observer=null;if(root){root.unmount();root=null;}reader.dataset.frControls='collapsed';model={...model,expanded:false,moving:false};}
  };
 }
